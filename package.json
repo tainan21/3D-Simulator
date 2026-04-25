@@ -1,0 +1,27 @@
+{
+  "name": "rogue-geometric-universe-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "demarcate": "node scripts/demarcate-contract.mjs",
+    "verify": "npm run test && npm run build && npm run e2e"
+  },
+  "dependencies": {
+    "phaser": "4.0.0",
+    "three": "0.184.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1",
+    "@types/node": "^25.6.0",
+    "@types/three": "^0.184.0",
+    "typescript": "6.0.3",
+    "vite": "8.0.9",
+    "vitest": "4.1.5"
+  }
+}
