@@ -357,9 +357,9 @@ export function computeAiDebug(world: WorldState, options: AiDebugOptions = {}):
   const influenceField = options.influenceField ?? computeInfluenceField(livePieces, liveTowers, world.actors, world.baseCore);
   const player = world.actors.find((actor) => actor.kind === "player");
   return world.actors
-    .filter((actor) => actor.kind === "enemy" || actor.kind === "boss")
+    .filter((actor) => actor.kind === "enemy" || actor.kind === "dwarf" || actor.kind === "boss")
     .map((actor) => {
-      const actorKind = actor.kind as "enemy" | "boss";
+      const actorKind = actor.kind as "enemy" | "dwarf" | "boss";
       const perception = evaluatePerception(world, actor, player, policy, livePieces);
       const { shape, decision } = chooseTarget(world, actor, perception, player, policy, topology, influenceField, livePieces);
       const targetPoint = targetShapePoint(actor, shape);

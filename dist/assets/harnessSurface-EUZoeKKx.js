@@ -1,1 +1,0 @@
-var e={mount(e){return e.innerHTML=`<section class="panel-surface"><header><span class="panel-tag">harness</span><h1>Harness em migracao</h1><p>O modo 3-way vai ficar isolado aqui, fora do boot padrao do Studio.</p></header></section>`,{dispose:()=>{e.innerHTML=``}}}};export{e as default};

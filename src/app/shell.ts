@@ -10,7 +10,7 @@ export class AppShell {
   private readonly stores = createAppStores();
   private readonly performance = new PerformanceRegistry();
   private currentHandle?: SurfaceHandle;
-  private currentRoute: AppRoute = "/studio";
+  private currentRoute: AppRoute = "/hub";
   private mounted = false;
   private shell?: AppShellBindings;
   private detachRouter?: () => void;

@@ -1,5 +1,7 @@
 import { SURFACE_META } from "../routes";
 import type { AppSurfaceModule } from "../contracts";
+import { createRuntimeBakeArtifact, materializeRuntimeSession } from "../../runtime/materialize";
+import { loadScenarioPreset } from "../../studio/scenarios";
 
 const surfaceModule: AppSurfaceModule = {
   mount(host, context) {
@@ -19,9 +21,14 @@ const surfaceModule: AppSurfaceModule = {
       <section class="hub-surface" data-testid="hub-surface">
         <div class="hub-hero">
           <div>
-            <span class="hub-kicker">Entrada leve</span>
-            <h1>Escolha a superficie que precisa estar ativa.</h1>
-            <p>O boot padrao nao cria renderer, nao liga harness e nao sobe overlays ou diagnosticos pesados.</p>
+            <span class="hub-kicker">Universo matematico v1</span>
+            <h1>Jogue, construa e valide o mesmo mundo em 2D, 2.5D e 3D.</h1>
+            <p>A tela inicial materializa um roguelite simples sem separar regra de render: Studio, Fases e Game leem a mesma geometria canonica.</p>
+            <div class="hub-actions">
+              <button class="primary-action" data-action="start-game">1 - Jogar roguelite</button>
+              <button data-route="/studio">Abrir Studio</button>
+              <button data-route="/phases">Universo/Fases</button>
+            </div>
           </div>
           <dl class="hub-summary">
             <div><dt>Preset</dt><dd>${context.stores.settingsStore.getState().preset}</dd></div>
@@ -33,9 +40,21 @@ const surfaceModule: AppSurfaceModule = {
       </section>
     `;
     const onClick = (event: Event) => {
+      const action = (event.target as HTMLElement).closest<HTMLElement>("[data-action]");
+      if (action?.dataset.action === "start-game") {
+        const world = loadScenarioPreset("siege-lab", 101);
+        const artifact = createRuntimeBakeArtifact(world, "scenario", "Roguelite v1 - cerco inicial", 0, "siege-lab");
+        context.stores.runtimeStore.setState((current) => ({
+          ...current,
+          artifact,
+          session: materializeRuntimeSession(artifact),
+          replaySession: undefined
+        }));
+        context.navigate("/runtime");
+        return;
+      }
       const target = (event.target as HTMLElement).closest<HTMLElement>("[data-route]");
-      if (!target) return;
-      context.navigate(target.dataset.route as typeof context.route);
+      if (target) context.navigate(target.dataset.route as typeof context.route);
     };
     host.addEventListener("click", onClick);
     context.performance.update({

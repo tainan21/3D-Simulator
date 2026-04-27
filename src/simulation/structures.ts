@@ -36,6 +36,7 @@ export type RuntimeMeta = Readonly<{
 }>;
 
 function pieceMaxHp(piece: BasePiece): number {
+  if (piece.properties.maxHp > 0) return piece.properties.maxHp;
   if (piece.kind === "fence-tl") return 24;
   if (piece.kind === "gate") return 18;
   return 14;
@@ -49,15 +50,15 @@ function pieceIntegrity(hp: number, maxHp: number, pressure: number): StructureI
   return "intact";
 }
 
-function towerMaxHp(): number {
-  return 10;
+function towerMaxHp(tower: TowerPiece): number {
+  return tower.properties.maxHp > 0 ? tower.properties.maxHp : 10;
 }
 
-function defaultBaseCoreMaxHp(): number {
-  return 30;
+function defaultBaseCoreMaxHp(baseCore?: BaseCore): number {
+  return baseCore?.properties.maxHp ?? 30;
 }
 
-export function createStructureMap(pieces: BasePiece[], towers: TowerPiece[], baseCore: BaseCore, baseCoreHp = defaultBaseCoreMaxHp()): StructureMap {
+export function createStructureMap(pieces: BasePiece[], towers: TowerPiece[], baseCore: BaseCore, baseCoreHp = defaultBaseCoreMaxHp(baseCore)): StructureMap {
   const entries: Array<[string, StructureState]> = pieces.map((piece) => {
     const maxHp = pieceMaxHp(piece);
     return [
@@ -74,7 +75,7 @@ export function createStructureMap(pieces: BasePiece[], towers: TowerPiece[], ba
   });
 
   for (const tower of towers) {
-    const maxHp = towerMaxHp();
+    const maxHp = towerMaxHp(tower);
     entries.push([
       tower.id,
       {

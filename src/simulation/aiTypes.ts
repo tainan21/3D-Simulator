@@ -32,7 +32,7 @@ export type AiDecisionSnapshot = Readonly<{
 
 export type AiDebugState = Readonly<{
   actorId: string;
-  actorKind: "enemy" | "boss";
+  actorKind: "enemy" | "dwarf" | "boss";
   objective: AiObjectiveKind;
   targetId: string;
   targetPoint: Vec2;

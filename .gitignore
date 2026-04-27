@@ -1,0 +1,15 @@
+node_modules/
+dist/
+artifacts/
+playwright-report/
+test-results/
+.playwright-mcp/
+.vite/
+coverage/
+.cache/
+.env
+.env.*
+*.log
+/*.png
+.DS_Store
+Thumbs.db

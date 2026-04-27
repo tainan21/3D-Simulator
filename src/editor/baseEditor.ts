@@ -1,5 +1,5 @@
 import { distance, snapToGrid, type Vec2 } from "../kernel/vector";
-import { CELL_SIZE, SOCKET_SNAP_RADIUS } from "../kernel/worldUnits";
+import { CELL_SIZE, layerToBaseY, SOCKET_SNAP_RADIUS } from "../kernel/worldUnits";
 import {
   attachTower,
   createFence,
@@ -13,6 +13,7 @@ import {
   type BasePiece,
   type FenceTLPiece,
   type GateState,
+  type GameObjectProperties,
   type HeightConnector,
   type HeightConnectorKind,
   type HeightLayer,
@@ -89,11 +90,11 @@ export class BaseEditor {
       this.newConnectorId(kind),
       kind,
       {
-        position: { x: snappedFrom.x, y: fromLayer * 2.4, z: snappedFrom.z },
+        position: { x: snappedFrom.x, y: layerToBaseY(fromLayer), z: snappedFrom.z },
         layer: fromLayer
       },
       {
-        position: { x: snappedTo.x, y: toLayer * 2.4, z: snappedTo.z },
+        position: { x: snappedTo.x, y: layerToBaseY(toLayer), z: snappedTo.z },
         layer: toLayer
       }
     );
@@ -115,6 +116,36 @@ export class BaseEditor {
 
   setGateState(gateId: string, state: GateState): void {
     this.pieces = this.pieces.map((piece) => (piece.id === gateId && piece.kind === "gate" ? { ...piece, state } : piece));
+  }
+
+  updatePieceProperties(pieceId: string, patch: Partial<GameObjectProperties>): void {
+    this.pieces = this.pieces.map((piece) => {
+      if (piece.id !== pieceId) return piece;
+      return {
+        ...piece,
+        properties: {
+          ...piece.properties,
+          ...patch,
+          measurement: { ...piece.properties.measurement, ...patch.measurement },
+          tags: patch.tags ?? piece.properties.tags
+        }
+      };
+    });
+  }
+
+  updateTowerProperties(towerId: string, patch: Partial<GameObjectProperties>): void {
+    this.towers = this.towers.map((tower) => {
+      if (tower.id !== towerId) return tower;
+      return {
+        ...tower,
+        properties: {
+          ...tower.properties,
+          ...patch,
+          measurement: { ...tower.properties.measurement, ...patch.measurement },
+          tags: patch.tags ?? tower.properties.tags
+        }
+      };
+    });
   }
 
   deleteNear(point: Vec2, radius = 0.3): BasePiece | HeightConnector | undefined {
@@ -160,7 +191,7 @@ export class BaseEditor {
   setPieceLayer(pieceId: string, heightLayer: HeightLayer): void {
     this.pieces = this.pieces.map((piece) => {
       if (piece.id !== pieceId) return piece;
-      return { ...piece, heightLayer, baseY: heightLayer * 2.4 };
+      return { ...piece, heightLayer, baseY: layerToBaseY(heightLayer) };
     });
     this.syncTowerAnchors();
   }

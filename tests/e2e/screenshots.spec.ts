@@ -122,6 +122,8 @@ function structuralSnapshot(snapshot: CanonicalSnapshot) {
 
 async function openStudio(page: Page): Promise<void> {
   await page.goto("/");
+  await expect(page.getByTestId("hub-surface")).toBeVisible();
+  await page.getByRole("button", { name: "Abrir Studio" }).click({ force: true });
   await expect(page.getByTestId("workspace-menu")).toContainText("Studio");
   await expect(page.getByTestId("workspace-menu")).toContainText("Fases");
   await expect(page.getByTestId("workspace-menu")).toContainText("Runtime");
@@ -214,9 +216,8 @@ test.describe("studio geometric harness", () => {
 
     const studioBefore = await readCanonical(page);
     await page.locator("[data-testid='studio-toolbar'] [data-studio-action='bake-runtime']").click({ force: true });
-    await page.waitForFunction(() => document.querySelector("main")?.className.includes("surface-runtime") ?? false);
-    await expect(page.locator("main.shell")).toBeVisible();
     await expect(page.getByTestId("debug-panel")).toContainText("Runtime");
+    await expect(page.getByTestId("canvas-host")).toBeVisible();
     await expect(page.locator("[data-testid='canvas-host'] canvas")).toHaveCount(1);
     await page.waitForTimeout(350);
 
@@ -228,10 +229,10 @@ test.describe("studio geometric harness", () => {
     await page.waitForTimeout(250);
     await page.locator("[data-action='runtime-replay']").click({ force: true });
     await page.waitForTimeout(250);
-    await expect(page.getByTestId("debug-panel")).toContainText("Estruturas");
-    await expect(page.getByTestId("debug-panel")).toContainText("Combate");
+    await expect(page.getByTestId("debug-panel")).toContainText("Performance");
+    await expect(page.getByTestId("debug-panel")).toContainText("Debug");
 
-    await page.locator("main.shell").screenshot({
+    await page.screenshot({
       path: path.join(screenshotDir, `${testInfo.project.name}-runtime-vertical-slice.png`),
       animations: "disabled"
     });
@@ -242,24 +243,21 @@ test.describe("studio geometric harness", () => {
     mkdirSync(screenshotDir, { recursive: true });
     await openStudio(page);
 
-    await page.evaluate(() => {
-      const button = document.querySelector("[data-testid='workspace-menu'] [data-surface='phases']");
-      if (!(button instanceof HTMLButtonElement)) throw new Error("Fases button not found.");
-      button.click();
-    });
-    await page.waitForFunction(() => document.querySelector("main")?.className.includes("surface-phases") ?? false);
-    await expect(page.locator("main.shell")).toBeVisible();
-    await expect(page.locator("#canvas-host")).toBeVisible();
-    await expect(page.getByTestId("debug-panel")).toContainText("Fases");
-    await expect(page.locator("[data-phase-field='scenario']")).toBeVisible();
+    await page.locator("[data-testid='workspace-menu'] [data-route='/phases']").click({ force: true });
+    await expect(page.getByTestId("canvas-host")).toBeVisible();
+    await expect(page.getByTestId("debug-panel")).toContainText("Universo");
+    await expect(page.locator("[data-phase-field='region']")).toBeVisible();
     await expect(page.locator("[data-testid='canvas-host'] canvas")).toHaveCount(1);
 
-    await page.locator("[data-phase-field='scenario']").selectOption("height-lab");
+    const regionOptions = await page.locator("[data-phase-field='region'] option").evaluateAll((options) =>
+      options.map((option) => ({ value: (option as HTMLOptionElement).value, text: option.textContent ?? "" }))
+    );
+    if (regionOptions.length < 2) throw new Error("Expected at least two universe regions.");
+    await page.locator("[data-phase-field='region']").selectOption(regionOptions[1].value);
     await page.waitForTimeout(350);
-    await expect(page.getByTestId("debug-panel")).toContainText("height-lab");
+    await expect(page.getByTestId("debug-panel")).toContainText(regionOptions[1].text);
     let canonical = await readCanonical(page);
-    expect(canonical.connectors.length).toBeGreaterThan(0);
-    expect(canonical.pieces.some((piece) => piece.baseY > 0)).toBe(true);
+    expect(canonical.pieces.length).toBeGreaterThan(0);
 
     await page.locator("[data-mode='2d']").click({ force: true });
     await page.waitForTimeout(150);
@@ -273,16 +271,16 @@ test.describe("studio geometric harness", () => {
     await page.waitForTimeout(120);
     await expectCanvasHasCanonicalInk(page.locator("[data-testid='canvas-host'] canvas"));
 
-    await page.locator("[data-phase-field='scenario']").selectOption("chunks-101");
+    await page.locator("[data-phase-field='region']").selectOption(regionOptions.at(-1)!.value);
     await page.waitForTimeout(350);
     canonical = await readCanonical(page);
-    await expect(page.getByTestId("debug-panel")).toContainText("chunks-101");
-    await expect(page.getByTestId("debug-panel")).toContainText("Seed 101");
+    await expect(page.getByTestId("debug-panel")).toContainText(regionOptions.at(-1)!.text);
+    await expect(page.getByTestId("debug-panel")).toContainText("Universo");
     expect(canonical.connectors.length).toBeGreaterThan(0);
     expect(canonical.pieces.length).toBeGreaterThan(0);
     expect(canonical.baseCore.radius).toBeGreaterThan(0);
 
-    await page.locator("main.shell").screenshot({
+    await page.screenshot({
       path: path.join(screenshotDir, `${testInfo.project.name}-fases-chunks.png`),
       animations: "disabled"
     });

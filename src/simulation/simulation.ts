@@ -1,7 +1,7 @@
 import { bossBody } from "../domain/boss";
-import { actorCircle, baseCoreCircle, CANONICAL_DIMENSIONS, type Actor } from "../domain/canonical";
+import { actorCircle, baseCoreCircle, CANONICAL_DIMENSIONS, pieceCapsule, type Actor } from "../domain/canonical";
 import type { DebugContact } from "../domain/debug";
-import { circleIntersectsCapsule, nearestPointOnCircle, nearestPointOnCapsule, type Capsule2D } from "../kernel/shapes";
+import { circleIntersectsCapsule, distanceToCapsule, nearestPointOnCircle, nearestPointOnCapsule, type Capsule2D } from "../kernel/shapes";
 import { add, distance, normalize, scale, sub, type Vec2 } from "../kernel/vector";
 import { computeAiDebug, computeNextAiMemory } from "./ai";
 import type { AiPolicyConfig } from "./aiPolicy";
@@ -15,6 +15,7 @@ export { blockingCapsules, canOccupy, moveActor } from "./collision";
 export type InputState = Readonly<{
   move: Vec2;
   attack?: boolean;
+  interact?: boolean;
 }>;
 
 function waypointDelta(position: Vec2, waypoints: Array<{ point: Vec2 }>, speed: number, dt: number): Vec2 {
@@ -63,12 +64,13 @@ function applyPlayerConnectorTraversal(actor: Actor, world: WorldState): Actor {
 export function stepSimulation(world: WorldState, input: InputState, dt: number, aiPolicy?: AiPolicyConfig): WorldState {
   if (world.run.phase !== "combat") return world;
 
-  const collisionPieces = activePieces(world.pieces, world.structures);
-  const aiDebug = computeAiDebug(world, { policy: aiPolicy });
+  const interactionWorld = applyPlayerGateInteraction(world, input);
+  const collisionPieces = activePieces(interactionWorld.pieces, interactionWorld.structures);
+  const aiDebug = computeAiDebug(interactionWorld, { policy: aiPolicy });
   const nextActors = world.actors.map((actor) => {
     if (actor.kind === "player") {
       const moved = moveActor(actor, scale(normalize(input.move), actor.speed * playerSpeedMultiplier(world.run) * dt), collisionPieces);
-      return applyPlayerConnectorTraversal(moved, world);
+      return applyPlayerConnectorTraversal(moved, interactionWorld);
     }
 
     const debugEntry = aiDebug.find((entry) => entry.actorId === actor.id);
@@ -86,13 +88,28 @@ export function stepSimulation(world: WorldState, input: InputState, dt: number,
   });
 
   const nextWorld = applyRogueLoop({
-    ...world,
+    ...interactionWorld,
     tick: world.tick + 1,
     actors: nextActors,
-    aiMemory: computeNextAiMemory(world, aiDebug),
-    structures: withPressureDecay(world.structures, dt)
+    aiMemory: computeNextAiMemory(interactionWorld, aiDebug),
+    structures: withPressureDecay(interactionWorld.structures, dt)
   }, input, dt);
   return nextWorld;
+}
+
+function applyPlayerGateInteraction(world: WorldState, input: InputState): WorldState {
+  if (!input.interact) return world;
+  const player = world.actors.find((actor) => actor.kind === "player");
+  if (!player) return world;
+  const gate = world.pieces
+    .filter((piece) => piece.kind === "gate" && piece.state === "closed" && piece.heightLayer === player.heightLayer)
+    .map((piece) => ({ piece, d: distanceToCapsule(player.position, pieceCapsule(piece)) - player.radius }))
+    .sort((a, b) => a.d - b.d)[0]?.piece;
+  if (!gate || distanceToCapsule(player.position, pieceCapsule(gate)) - player.radius > 0.72) return world;
+  return {
+    ...world,
+    pieces: world.pieces.map((piece) => (piece.id === gate.id && piece.kind === "gate" ? { ...piece, state: "open" as const } : piece))
+  };
 }
 
 export function actorCanHit(attacker: Actor, target: Actor): boolean {
@@ -153,7 +170,7 @@ function applyRogueLoop(world: WorldState, input: InputState, dt: number): World
   if (run.baseCoreHp <= 0 || (player && player.hp <= 0)) {
     return { ...world, actors, structures, combatLog, run: { ...run, phase: "defeat", pendingChoices: [] } };
   }
-  const hostiles = actors.filter((actor) => actor.kind === "enemy" || actor.kind === "boss");
+  const hostiles = actors.filter((actor) => actor.kind === "enemy" || actor.kind === "dwarf" || actor.kind === "boss");
   if (hostiles.length === 0) {
     run = { ...run, phase: "upgrade", pendingChoices: nextUpgradeChoices(run), towerPulseTimer: 0, playerAttackTimer: 0.22 };
   }

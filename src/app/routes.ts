@@ -28,8 +28,8 @@ export const SURFACE_LOADERS = new Map<AppRoute, SurfaceLoader>(loaderEntries);
 export const SURFACE_META_BY_ROUTE = new Map(SURFACE_META.map((entry) => [entry.route, entry] as const));
 
 export function normalizeRoute(pathname: string): AppRoute {
-  if (!pathname || pathname === "/") return "/studio";
+  if (!pathname || pathname === "/") return "/hub";
   const cleaned = pathname.endsWith("/") && pathname !== "/" ? pathname.slice(0, -1) : pathname;
   if (SURFACE_META_BY_ROUTE.has(cleaned as AppRoute)) return cleaned as AppRoute;
-  return "/studio";
+  return "/hub";
 }

@@ -13,6 +13,7 @@ import { actorOrientation, baseCoreOrientation, pieceOrientation, towerOrientati
 import type { AiDebugState } from "../simulation/aiTypes";
 import { structureState, structureTintFactor } from "../simulation/structures";
 import type { RenderDataProvider, ThreeCameraState } from "./contracts";
+import { computeRenderDirtyFlags, createRenderFingerprint, type RenderFingerprint } from "./dirtyFlags";
 
 export type ThreeRendererOptions = RenderDataProvider & {
   parent: HTMLElement;
@@ -52,8 +53,13 @@ export class ThreeValidationRenderer {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(58, 1, 0.04, CAMERA_FAR);
   private readonly root = new THREE.Group();
+  private readonly lights: THREE.Light[] = [];
   private animation = 0;
   private readonly resizeHandler = () => this.resize();
+  private lastFingerprint?: RenderFingerprint;
+  private lastMetricsAt = performance.now();
+  private framesSinceMetrics = 0;
+  private metrics = { fps: 0, frameMs: 0, renderMs: 0, overlayMs: 0, drawCalls: 0, triangles: 0 };
 
   constructor(options: ThreeRendererOptions) {
     this.options = options;
@@ -64,7 +70,7 @@ export class ThreeValidationRenderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.02;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
   }
 
   mount(): void {
@@ -86,8 +92,14 @@ export class ThreeValidationRenderer {
     this.renderer.domElement.remove();
   }
 
+  getMetrics(): typeof this.metrics {
+    return this.metrics;
+  }
+
   private addLighting(): void {
-    this.scene.add(new THREE.HemisphereLight(0xc4dbff, 0x1c2532, 1.08));
+    const hemi = new THREE.HemisphereLight(0xc4dbff, 0x1c2532, 1.08);
+    this.scene.add(hemi);
+    this.lights.push(hemi);
     const sun = new THREE.DirectionalLight(0xffefc8, 2.8);
     sun.position.set(-10, 18, -6);
     sun.castShadow = true;
@@ -99,9 +111,11 @@ export class ThreeValidationRenderer {
     sun.shadow.camera.top = 24;
     sun.shadow.camera.bottom = -24;
     this.scene.add(sun);
+    this.lights.push(sun);
     const fill = new THREE.DirectionalLight(0x74f5ff, 0.4);
     fill.position.set(9, 6, 14);
     this.scene.add(fill);
+    this.lights.push(fill);
   }
 
   private resize(): void {
@@ -113,20 +127,54 @@ export class ThreeValidationRenderer {
   }
 
   private loop = (): void => {
-    this.rebuild();
+    const frameStart = performance.now();
+    const world = this.options.getWorld();
+    const debug = this.options.getDebugOptions();
+    const aiDebug = this.options.getAiDebug();
+    const contacts = this.options.getDebugContacts();
+    const validationIssues = this.options.getValidationIssues();
+    const influenceField = this.options.getInfluenceField();
+    const replayState = this.options.getReplayState();
+    const camera = this.options.getCameraState();
+    const ghostWorld = this.options.getGhostWorld?.();
+    this.applyVisualOptions(debug);
+    const nextFingerprint = createRenderFingerprint({ world, debug, aiDebug, contacts, validationIssues, influenceField, replayState, camera, ghostWorld });
+    const automaticDirty = computeRenderDirtyFlags(this.lastFingerprint, nextFingerprint);
+    const externalDirty = this.options.getRenderDirtyFlags?.();
+    const dirty = externalDirty
+      ? {
+          geometry: automaticDirty.geometry || externalDirty.geometry,
+          simulation: automaticDirty.simulation || externalDirty.simulation,
+          camera: automaticDirty.camera || externalDirty.camera,
+          overlays: automaticDirty.overlays || externalDirty.overlays
+        }
+      : automaticDirty;
+    this.updateCamera(world);
+    if (dirty.geometry || dirty.simulation || dirty.overlays) {
+      this.rebuildWithSnapshot(world, debug, aiDebug, ghostWorld);
+      this.lastFingerprint = nextFingerprint;
+    }
+    const renderStart = performance.now();
     this.renderer.render(this.scene, this.camera);
+    this.updateMetrics(frameStart, renderStart);
     this.animation = requestAnimationFrame(this.loop);
   };
 
   private rebuild(): void {
+    this.rebuildWithSnapshot(this.options.getWorld(), this.options.getDebugOptions(), this.options.getAiDebug(), this.options.getGhostWorld?.());
+  }
+
+  private rebuildWithSnapshot(
+    world: ReturnType<ThreeRendererOptions["getWorld"]>,
+    debug: ReturnType<ThreeRendererOptions["getDebugOptions"]>,
+    aiDebug: ReturnType<ThreeRendererOptions["getAiDebug"]>,
+    ghostWorld?: ReturnType<ThreeRendererOptions["getWorld"]>
+  ): void {
     this.disposeGroup(this.root);
     this.root.clear();
-    const world = this.options.getWorld();
-    const debug = this.options.getDebugOptions();
-    const aiDebug = this.options.getAiDebug();
-    this.updateCamera(world);
     this.drawGround(debug);
-    if (debug.enabled && debug.influence) this.drawInfluenceField();
+    if (debug.effects && ghostWorld) this.drawGhostWorld(ghostWorld);
+    if (debug.enabled && debug.effects && debug.influence) this.drawInfluenceField();
     this.drawBaseCore(world, debug);
     for (const connector of world.connectors) this.drawConnector(connector);
     for (const piece of world.pieces) this.drawPiece(piece, world.selectedId === piece.id, debug);
@@ -136,8 +184,31 @@ export class ThreeValidationRenderer {
     if (debug.enabled && debug.targets) for (const entry of aiDebug) this.drawAiTarget(entry);
     if (debug.enabled && debug.routes) for (const entry of aiDebug) this.drawAiRoute(entry);
     if (debug.enabled && debug.navigation) for (const entry of aiDebug) this.drawNavigationSamples(entry);
-    if (debug.enabled && debug.damage) this.drawStructuralDamage(world);
+    if (debug.enabled && debug.effects && debug.damage) this.drawStructuralDamage(world);
     if (debug.enabled && debug.diagnostics) this.drawValidationIssues();
+  }
+
+  private applyVisualOptions(debug: ReturnType<ThreeRendererOptions["getDebugOptions"]>): void {
+    this.renderer.shadowMap.enabled = debug.shadows;
+    this.scene.fog = debug.fog ? new THREE.Fog(0x0d1117, 24, 76) : null;
+    for (const light of this.lights) light.visible = debug.lighting;
+  }
+
+  private updateMetrics(frameStart: number, renderStart: number): void {
+    this.framesSinceMetrics += 1;
+    const now = performance.now();
+    if (now - this.lastMetricsAt < 260) return;
+    const renderInfo = this.renderer.info.render;
+    this.metrics = {
+      fps: Math.round((this.framesSinceMetrics * 1000) / Math.max(1, now - this.lastMetricsAt)),
+      frameMs: now - frameStart,
+      renderMs: now - renderStart,
+      overlayMs: 0,
+      drawCalls: renderInfo.calls,
+      triangles: renderInfo.triangles
+    };
+    this.framesSinceMetrics = 0;
+    this.lastMetricsAt = now;
   }
 
   private updateCamera(world: ReturnType<ThreeRendererOptions["getWorld"]>): void {
@@ -195,9 +266,11 @@ export class ThreeValidationRenderer {
     ground.receiveShadow = true;
     this.root.add(ground);
 
-    const grid = new THREE.GridHelper(GROUND_SIZE, GROUND_SIZE, 0x556d88, 0x243141);
-    grid.position.y = 0.015;
-    this.root.add(grid);
+    if (debug.grid) {
+      const grid = new THREE.GridHelper(GROUND_SIZE, GROUND_SIZE, 0x556d88, 0x243141);
+      grid.position.y = 0.015;
+      this.root.add(grid);
+    }
 
     if (debug.enabled && debug.axes) {
       const axes = new THREE.AxesHelper(1.5);
@@ -216,6 +289,26 @@ export class ThreeValidationRenderer {
       mesh.rotation.x = -Math.PI * 0.5;
       mesh.position.set(cell.center.x, 0.03, cell.center.z);
       this.root.add(mesh);
+    }
+  }
+
+  private drawGhostWorld(world: ReturnType<ThreeRendererOptions["getWorld"]>): void {
+    for (const piece of world.pieces) {
+      const orientation = pieceOrientation(piece);
+      const length = Math.hypot(piece.b.x - piece.a.x, piece.b.z - piece.a.z);
+      const group = this.createFrameGroup(orientation.pivot);
+      this.root.add(group);
+      const material = new THREE.MeshBasicMaterial({ color: 0xc4dbff, transparent: true, opacity: 0.14, wireframe: true });
+      for (const localX of this.localPostPositions(length)) this.addPost(group, localX, piece.height, piece.thickness * 0.42, material);
+      for (const y of this.railHeights(piece.height)) this.addRail(group, length, y, piece.thickness * 0.45, material);
+    }
+    for (const actor of world.actors) {
+      const ghost = new THREE.Mesh(
+        new THREE.CylinderGeometry(actor.radius, actor.radius, actor.height, 12),
+        new THREE.MeshBasicMaterial({ color: 0x74f5ff, transparent: true, opacity: 0.12, wireframe: true })
+      );
+      ghost.position.set(actor.position.x, actor.baseY + actor.height * 0.5, actor.position.z);
+      this.root.add(ghost);
     }
   }
 

@@ -17,6 +17,11 @@ export type DebugOverlayOptions = Readonly<{
   influence: boolean;
   damage: boolean;
   diagnostics: boolean;
+  shadows: boolean;
+  fog: boolean;
+  grid: boolean;
+  lighting: boolean;
+  effects: boolean;
 }>;
 
 export type DebugContact = Readonly<{
@@ -45,5 +50,10 @@ export const DEFAULT_DEBUG_OVERLAYS: DebugOverlayOptions = {
   navigation: false,
   influence: true,
   damage: true,
-  diagnostics: true
+  diagnostics: true,
+  shadows: true,
+  fog: true,
+  grid: true,
+  lighting: true,
+  effects: true
 };

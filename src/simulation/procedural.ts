@@ -1,6 +1,6 @@
 import { BaseEditor } from "../editor/baseEditor";
 import type { ChunkDescriptor, ChunkGenerationReport, ChunkSeed } from "../domain/analysis";
-import { createActor, createBaseCore, type HeightConnector, type TowerPiece } from "../domain/canonical";
+import { createActor, createBaseCore, createTower, type HeightConnector, type TowerPiece } from "../domain/canonical";
 import type { WorldState } from "./worldState";
 import { createRogueRun } from "./roguelite";
 import { createStructureMap } from "./structures";
@@ -85,14 +85,7 @@ export function createProceduralWorld(seed: ChunkSeed): WorldState {
     chunk.towers
       .map((tower) => pieces.find((piece) => piece.id === tower.fenceId && piece.kind === "fence-tl"))
       .filter((piece): piece is Extract<(typeof pieces)[number], { kind: "fence-tl" }> => Boolean(piece))
-      .map((piece, index) => ({
-        id: `proc-tower-${index + 1}`,
-        fenceId: piece.id,
-        radius: 0.09,
-        height: 1.2,
-        heightLayer: piece.heightLayer,
-        anchor: { x: (piece.a.x + piece.b.x) * 0.5, y: piece.baseY + piece.height, z: (piece.a.z + piece.b.z) * 0.5 }
-      }))
+      .map((piece, index) => ({ ...createTower(`proc-tower-${index + 1}`, piece), fenceId: piece.id }))
   );
   return {
     pieces,

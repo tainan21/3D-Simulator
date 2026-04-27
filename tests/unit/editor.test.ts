@@ -87,12 +87,12 @@ describe("BaseEditor", () => {
     expect(editor.towers[0]).toMatchObject({
       fenceId: tl.id,
       heightLayer: 2,
-      anchor: { x: 1, y: 7.8, z: 0 }
+      anchor: { x: 1, y: 8.8, z: 0 }
     });
     expect(editor.connectors[0]).toMatchObject({
       kind: "top-socket-link",
       from: { layer: 2, position: { x: 1, y: 4.8, z: 0 } },
-      to: { layer: 2, position: { x: 1, y: 7.8, z: 0 } }
+      to: { layer: 2, position: { x: 1, y: 8.8, z: 0 } }
     });
   });
 });

@@ -1,4 +1,4 @@
-import { BaseEditor } from "../../editor/baseEditor";
+import { BaseEditor, type PlacementTool } from "../../editor/baseEditor";
 import { pieceHorizontalBounds, pieceSockets, type BasePiece } from "../../domain/canonical";
 import { DEFAULT_DEBUG_OVERLAYS, type DebugOverlayOptions } from "../../domain/debug";
 import { advanceUniverseOffscreen, getUniverseRegion, materializeUniverseRegion, rerollUniverseRegionSeed, setActiveUniverseRegion } from "../../domain/universe";
@@ -34,7 +34,12 @@ const OVERLAY_KEYS: Array<Exclude<keyof DebugOverlayOptions, "enabled">> = [
   "navigation",
   "influence",
   "damage",
-  "diagnostics"
+  "diagnostics",
+  "shadows",
+  "fog",
+  "grid",
+  "lighting",
+  "effects"
 ];
 
 export class PhasesSurfaceController {
@@ -288,7 +293,7 @@ export class PhasesSurfaceController {
     if (!this.paused) {
       const frameStart = performance.now();
       if (this.state.mode === "3d") {
-        const turn = Number(this.keyboard.pressed.has("KeyE")) - Number(this.keyboard.pressed.has("KeyQ"));
+        const turn = Number(this.keyboard.pressed.has("KeyC")) - Number(this.keyboard.pressed.has("KeyZ"));
         const pitch = Number(this.keyboard.pressed.has("KeyR")) - Number(this.keyboard.pressed.has("KeyF"));
         if (turn !== 0 || pitch !== 0) {
           this.setState((current) => ({
@@ -495,7 +500,7 @@ export class PhasesSurfaceController {
   }
 
   private draftSegment() {
-    if (!this.state.pendingPoint || !this.state.hoverPoint || this.state.tool === "tower" || this.state.tool === "erase") return undefined;
+    if (!this.state.pendingPoint || !this.state.hoverPoint || !this.isSegmentTool(this.state.tool)) return undefined;
     return this.state.editor.previewSegment(this.state.tool, this.state.pendingPoint, this.state.hoverPoint);
   }
 
@@ -535,6 +540,7 @@ export class PhasesSurfaceController {
       this.updateHud(true);
       return;
     }
+    if (!this.isSegmentTool(this.state.tool)) return;
     if (!this.state.pendingPoint) {
       this.setState((current) => ({ ...current, pendingPoint: point }));
       this.updateHud(true);
@@ -601,12 +607,14 @@ export class PhasesSurfaceController {
           x: forward.x * forwardAxis + right.x * strafeAxis,
           z: forward.z * forwardAxis + right.z * strafeAxis
         }),
-        attack: this.keyboard.pressed.has("Space")
+        attack: this.keyboard.pressed.has("Space"),
+        interact: this.keyboard.pressed.has("KeyE")
       };
     }
     return {
       move: { x: strafeAxis, z: -forwardAxis },
-      attack: this.keyboard.pressed.has("Space")
+      attack: this.keyboard.pressed.has("Space"),
+      interact: this.keyboard.pressed.has("KeyE")
     };
   }
 
@@ -625,7 +633,17 @@ export class PhasesSurfaceController {
     if (tool === "fence-tl") return "Cerca TL";
     if (tool === "gate") return "Portao";
     if (tool === "tower") return "Torre";
+    if (tool === "ramp") return "Rampa";
+    if (tool === "platform-link") return "Link";
+    if (tool === "player") return "Player";
+    if (tool === "enemy") return "Mob";
+    if (tool === "dwarf") return "Anao";
+    if (tool === "boss") return "Boss";
     return "Apagar";
+  }
+
+  private isSegmentTool(tool: ToolMode): tool is PlacementTool {
+    return tool === "fence" || tool === "fence-tl" || tool === "gate";
   }
 
   private cameraModeLabel(mode: CameraMode3D): string {
@@ -649,7 +667,12 @@ export class PhasesSurfaceController {
       navigation: "Nav",
       influence: "Heatmap",
       damage: "Damage",
-      diagnostics: "Issues"
+      diagnostics: "Issues",
+      shadows: "Shadows",
+      fog: "Fog",
+      grid: "Grid",
+      lighting: "Light",
+      effects: "FX"
     };
     return labels[key];
   }

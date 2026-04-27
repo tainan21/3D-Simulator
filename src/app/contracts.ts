@@ -27,7 +27,7 @@ export type SurfaceRole = "hub" | "editing" | "game" | "experiment" | "validatio
 
 export type PerformancePreset = "quality" | "balanced" | "performance" | "debug-heavy";
 export type ViewMode = "2d" | "25d" | "3d";
-export type ToolMode = PlacementTool | "tower" | "erase";
+export type ToolMode = PlacementTool | "tower" | "erase" | "ramp" | "platform-link" | "player" | "enemy" | "dwarf" | "boss";
 export type PhaseScenarioId = "baseline" | "height-lab" | "siege-lab" | "chunks-101";
 
 export type SettingsState = Readonly<{

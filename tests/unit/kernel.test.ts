@@ -35,7 +35,7 @@ describe("WorldGeometryKernel", () => {
   it("derives capsule bounds from footprint and not height", () => {
     const tl = createFenceTL("tl", { x: 0, z: 0 }, { x: 2, z: 0 });
     const bounds = pieceHorizontalBounds(tl);
-    expect(bounds).toEqual({ min: { x: -0.09, z: -0.09 }, max: { x: 2.09, z: 0.09 } });
+    expect(bounds).toEqual({ min: { x: -0.11, z: -0.11 }, max: { x: 2.11, z: 0.11 } });
     expect(boundsForCapsule(pieceCapsule(tl))).toEqual(bounds);
   });
 

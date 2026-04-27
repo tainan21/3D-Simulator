@@ -72,7 +72,8 @@ export function spawnWaveActors(wave: number): Actor[] {
   const actors: Actor[] = [];
   for (let i = 0; i < enemyCount; i += 1) {
     const side = i % 2 === 0 ? -1 : 1;
-    actors.push(createActor(`enemy-w${wave}-${i + 1}`, "enemy", { x: side * (7.2 + i * 0.22), z: 3.4 - i * 0.55 }));
+    const kind = wave >= 2 && i % 3 === 2 ? "dwarf" : "enemy";
+    actors.push(createActor(`${kind}-w${wave}-${i + 1}`, kind, { x: side * (7.2 + i * 0.22), z: 3.4 - i * 0.55 }));
   }
   actors.push(createActor(`boss-w${wave}`, "boss", { x: 8.6, z: 0.8 }));
   return actors;

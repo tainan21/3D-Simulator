@@ -31,9 +31,10 @@ function testWorld(overrides: Partial<WorldState>): WorldState {
 
 describe("Simulation", () => {
   it("keeps actor body dimensions canonical", () => {
-    expect(createActor("p", "player", { x: 0, z: 0 })).toMatchObject({ radius: 0.28, height: 1.7, speed: 2.6 });
-    expect(createActor("e", "enemy", { x: 0, z: 0 })).toMatchObject({ radius: 0.24, height: 1.4, speed: 1.6 });
-    expect(createActor("b", "boss", { x: 0, z: 0 })).toMatchObject({ radius: 0.75, height: 2.2 });
+    expect(createActor("p", "player", { x: 0, z: 0 })).toMatchObject({ radius: 0.28, height: 1, speed: 2.65 });
+    expect(createActor("e", "enemy", { x: 0, z: 0 })).toMatchObject({ radius: 0.34, height: 2, speed: 1.55 });
+    expect(createActor("d", "dwarf", { x: 0, z: 0 })).toMatchObject({ radius: 0.22, height: 0.5, speed: 2.15 });
+    expect(createActor("b", "boss", { x: 0, z: 0 })).toMatchObject({ radius: 0.95, height: 4 });
   });
 
   it("blocks boss movement through a closed fence", () => {
@@ -184,7 +185,7 @@ describe("Simulation", () => {
     const openBoss = openWorld.actors.find((actor) => actor.id === "boss");
 
     expect(closedBoss?.position.x).toBeGreaterThan(4.4);
-    expect(openBoss?.position.x).toBeLessThan(3.2);
+    expect(openBoss?.position.x).toBeLessThan(3.8);
   });
 
   it("debug contacts expose nearest point on canonical shape, not visual center", () => {
@@ -197,7 +198,7 @@ describe("Simulation", () => {
     const enemyContact = contacts.find((contact) => contact.actorId === "enemy")?.point;
     const bossContact = contacts.find((contact) => contact.actorId === "boss")?.point;
     expect(enemyContact).toEqual({ x: 0.28, z: 0 });
-    expect(bossContact?.x).toBeCloseTo(0.42);
+    expect(bossContact?.x).toBeCloseTo(0.55);
     expect(bossContact?.z).toBeCloseTo(0.8);
   });
 
@@ -207,6 +208,6 @@ describe("Simulation", () => {
     const player = createActor("player", "player", { x: 0, z: 0 });
 
     expect(upgraded.upgrades.playerSpeed).toBe(1);
-    expect(player).toMatchObject({ radius: 0.28, height: 1.7 });
+    expect(player).toMatchObject({ radius: 0.28, height: 1 });
   });
 });
