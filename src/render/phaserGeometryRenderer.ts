@@ -5,16 +5,18 @@ import {
   pieceCapsule,
   pieceHorizontalBounds,
   pieceSockets,
+  SURFACE_MATERIALS,
   type Actor,
   type BasePiece,
   type HeightConnector,
+  type SurfaceTile,
   type TowerPiece
 } from "../domain/canonical";
 import type { DebugContact, DebugOverlayOptions } from "../domain/debug";
 import type { SegmentPreview } from "../editor/baseEditor";
 import { actorOrientation, baseCoreOrientation, pieceOrientation, towerOrientation } from "../domain/orientation";
 import { orientedBoxCorners } from "../kernel/shapes";
-import { PIXELS_PER_UNIT } from "../kernel/worldUnits";
+import { cellToWorld, layerToBaseY, PIXELS_PER_UNIT } from "../kernel/worldUnits";
 import { iso, project2D, project25D, type Camera2D, type ScreenPoint, type Viewport } from "../kernel/projections";
 import { midpoint, type Vec2, type Vec3 } from "../kernel/vector";
 import type { AiDebugState } from "../simulation/aiTypes";
@@ -29,6 +31,7 @@ export type PhaserRendererOptions = RenderDataProvider & {
   getDraftSegment: () => SegmentPreview | undefined;
   onWorldClick: (point: Vec2) => void;
   onWorldHover: (point: Vec2) => void;
+  onWorldDrag?: (point: Vec2) => void;
   interactionEnabled?: boolean;
 };
 
@@ -39,6 +42,7 @@ function colorForPiece(piece: BasePiece): number {
 }
 
 function actorColor(actor: Actor): number {
+  if (actor.visual) return actor.visual.primaryColor;
   if (actor.kind === "player") return 0x7af0d4;
   if (actor.kind === "boss") return 0xe9609b;
   return 0xf2a65a;
@@ -99,7 +103,9 @@ class GeometryScene extends Phaser.Scene {
         this.options.onWorldClick(this.screenToWorld(pointer.x, pointer.y));
       });
       this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
-        this.options.onWorldHover(this.screenToWorld(pointer.x, pointer.y));
+        const point = this.screenToWorld(pointer.x, pointer.y);
+        this.options.onWorldHover(point);
+        if (pointer.isDown) this.options.onWorldDrag?.(point);
       });
     }
   }
@@ -175,6 +181,7 @@ class GeometryScene extends Phaser.Scene {
   }
 
   private draw2D(world: ReturnType<PhaserRendererOptions["getWorld"]>, viewport: Viewport): void {
+    this.drawSurfaceTiles2D(world.surfaceTiles ?? []);
     this.drawBaseCore2D(world);
     for (const connector of world.connectors) this.drawConnector2D(connector);
     for (const piece of world.pieces) this.drawPieceFootprint(piece, world.selectedId === piece.id);
@@ -186,6 +193,7 @@ class GeometryScene extends Phaser.Scene {
   }
 
   private draw25D(world: ReturnType<PhaserRendererOptions["getWorld"]>, viewport: Viewport): void {
+    this.drawSurfaceTiles25D(world.surfaceTiles ?? []);
     const drawItems = [
       { depth: world.baseCore.position.x + world.baseCore.position.z, draw: () => this.drawBaseCore25D(world) },
       ...world.connectors.map((connector) => ({ depth: connector.from.position.x + connector.from.position.z + 0.1, draw: () => this.drawConnector25D(connector) })),
@@ -197,6 +205,54 @@ class GeometryScene extends Phaser.Scene {
     this.drawDebugOverlays(world, this.options.getDebugContacts(), this.options.getDebugOptions());
     this.drawDraftSegment();
     this.drawModeBadge(viewport, "Studio 2.5D primario");
+  }
+
+  private drawSurfaceTiles2D(surfaceTiles: SurfaceTile[]): void {
+    for (const tile of surfaceTiles) {
+      const material = SURFACE_MATERIALS[tile.material];
+      const center = cellToWorld(tile.cell);
+      const corners = [
+        { x: center.x - 0.5, z: center.z - 0.5 },
+        { x: center.x + 0.5, z: center.z - 0.5 },
+        { x: center.x + 0.5, z: center.z + 0.5 },
+        { x: center.x - 0.5, z: center.z + 0.5 }
+      ];
+      this.fillProjectedPolygon(corners.map((corner) => this.projectGround(corner)), material.color, 0.16 + tile.intensity * 0.1);
+      const a = this.projectGround(corners[0]);
+      const b = this.projectGround(corners[2]);
+      this.graphics.lineStyle(tile.intensity, material.accentColor, 0.24 + tile.intensity * 0.12);
+      this.graphics.lineBetween(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  private drawSurfaceTiles25D(surfaceTiles: SurfaceTile[]): void {
+    for (const tile of surfaceTiles) {
+      const material = SURFACE_MATERIALS[tile.material];
+      const center = cellToWorld(tile.cell);
+      const y = layerToBaseY(tile.heightLayer) + 0.01;
+      const corners: Vec3[] = [
+        { x: center.x - 0.5, y, z: center.z - 0.5 },
+        { x: center.x + 0.5, y, z: center.z - 0.5 },
+        { x: center.x + 0.5, y, z: center.z + 0.5 },
+        { x: center.x - 0.5, y, z: center.z + 0.5 }
+      ];
+      this.fillProjectedPolygon(corners.map((corner) => this.project(corner)), material.color, 0.18 + tile.intensity * 0.11);
+      const a = this.project(corners[1]);
+      const b = this.project(corners[3]);
+      this.graphics.lineStyle(tile.intensity, material.accentColor, 0.22 + tile.intensity * 0.12);
+      this.graphics.lineBetween(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  private fillProjectedPolygon(points: ScreenPoint[], color: number, alpha: number): void {
+    const [first, ...rest] = points;
+    if (!first) return;
+    this.graphics.fillStyle(color, alpha);
+    this.graphics.beginPath();
+    this.graphics.moveTo(first.x, first.y);
+    for (const point of rest) this.graphics.lineTo(point.x, point.y);
+    this.graphics.closePath();
+    this.graphics.fillPath();
   }
 
   private drawDraftSegment(): void {
@@ -345,6 +401,8 @@ class GeometryScene extends Phaser.Scene {
     const p = this.projectGround(actor.position);
     this.graphics.fillStyle(actorColor(actor), 0.45);
     this.graphics.fillCircle(p.x, p.y, actor.radius * PIXELS_PER_UNIT * this.camera().zoom);
+    this.graphics.fillStyle(actor.visual?.secondaryColor ?? actorColor(actor), 0.42);
+    this.graphics.fillCircle(p.x, p.y, actor.radius * PIXELS_PER_UNIT * this.camera().zoom * 0.55);
     this.graphics.lineStyle(2, actorColor(actor), 1);
     this.graphics.strokeCircle(p.x, p.y, actor.radius * PIXELS_PER_UNIT * this.camera().zoom);
   }
@@ -358,6 +416,8 @@ class GeometryScene extends Phaser.Scene {
     this.graphics.lineBetween(foot.x, foot.y, top.x, top.y);
     this.graphics.fillStyle(actorColor(actor), 0.95);
     this.graphics.fillCircle(top.x, top.y, actor.kind === "boss" ? 13 : 8);
+    this.graphics.fillStyle(actor.visual?.accentColor ?? 0xffffff, 0.9);
+    this.graphics.fillCircle(top.x, top.y, actor.kind === "boss" ? 5 : 3);
   }
 
   private drawDebugOverlays(world: ReturnType<PhaserRendererOptions["getWorld"]>, contacts: DebugContact[], options: DebugOverlayOptions): void {

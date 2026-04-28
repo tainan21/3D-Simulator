@@ -4,12 +4,15 @@ import {
   pieceCapsule,
   pieceHorizontalBounds,
   pieceSockets,
+  SURFACE_MATERIALS,
   type Actor,
   type BasePiece,
   type HeightConnector,
+  type SurfaceTile,
   type TowerPiece
 } from "../domain/canonical";
 import { actorOrientation, baseCoreOrientation, pieceOrientation, towerOrientation } from "../domain/orientation";
+import { cellToWorld, layerToBaseY } from "../kernel/worldUnits";
 import type { AiDebugState } from "../simulation/aiTypes";
 import { structureState, structureTintFactor } from "../simulation/structures";
 import type { RenderDataProvider, ThreeCameraState } from "./contracts";
@@ -30,6 +33,7 @@ function pieceColor(piece: BasePiece): number {
 }
 
 function actorColor(actor: Actor): number {
+  if (actor.visual) return actor.visual.primaryColor;
   if (actor.kind === "player") return 0x7af0d4;
   if (actor.kind === "boss") return 0xe9609b;
   return 0xf2a65a;
@@ -173,13 +177,14 @@ export class ThreeValidationRenderer {
     this.disposeGroup(this.root);
     this.root.clear();
     this.drawGround(debug);
+    this.drawSurfaceTiles(world.surfaceTiles ?? []);
     if (debug.effects && ghostWorld) this.drawGhostWorld(ghostWorld);
     if (debug.enabled && debug.effects && debug.influence) this.drawInfluenceField();
     this.drawBaseCore(world, debug);
     for (const connector of world.connectors) this.drawConnector(connector);
     for (const piece of world.pieces) this.drawPiece(piece, world.selectedId === piece.id, debug);
     for (const tower of world.towers) this.drawTower(tower, world, debug);
-    for (const actor of world.actors) this.drawActor(actor, debug);
+    this.drawActors(world.actors, debug);
     if (debug.enabled && debug.nearest) for (const contact of this.options.getDebugContacts()) this.drawDebugContact(contact);
     if (debug.enabled && debug.targets) for (const entry of aiDebug) this.drawAiTarget(entry);
     if (debug.enabled && debug.routes) for (const entry of aiDebug) this.drawAiRoute(entry);
@@ -276,6 +281,73 @@ export class ThreeValidationRenderer {
       const axes = new THREE.AxesHelper(1.5);
       axes.position.set(-12.5, 0.04, -12.5);
       this.root.add(axes);
+    }
+  }
+
+  private drawSurfaceTiles(surfaceTiles: SurfaceTile[]): void {
+    if (surfaceTiles.length > 24) {
+      this.drawInstancedSurfaceTiles(surfaceTiles);
+      return;
+    }
+    for (const tile of surfaceTiles) {
+      const material = SURFACE_MATERIALS[tile.material];
+      const center = cellToWorld(tile.cell);
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.96, 0.96),
+        new THREE.MeshStandardMaterial({
+          color: material.color,
+          roughness: material.roughness,
+          metalness: 0,
+          transparent: true,
+          opacity: 0.34 + tile.intensity * 0.14
+        })
+      );
+      mesh.rotation.x = -Math.PI * 0.5;
+      mesh.position.set(center.x, layerToBaseY(tile.heightLayer) + 0.018, center.z);
+      mesh.receiveShadow = true;
+      this.root.add(mesh);
+
+      const accent = new THREE.Mesh(
+        new THREE.BoxGeometry(0.76, 0.012, Math.max(0.018, tile.intensity * 0.02)),
+        new THREE.MeshStandardMaterial({ color: material.accentColor, roughness: 0.62, metalness: 0 })
+      );
+      accent.rotation.y = Math.PI * 0.25;
+      accent.position.set(center.x, layerToBaseY(tile.heightLayer) + 0.032, center.z);
+      this.root.add(accent);
+    }
+  }
+
+  private drawInstancedSurfaceTiles(surfaceTiles: SurfaceTile[]): void {
+    const groups = new Map<string, SurfaceTile[]>();
+    for (const tile of surfaceTiles) {
+      const key = `${tile.material}:${tile.intensity}:${tile.heightLayer}`;
+      groups.set(key, [...(groups.get(key) ?? []), tile]);
+    }
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI * 0.5, 0, 0));
+    const scale = new THREE.Vector3(1, 1, 1);
+    for (const group of groups.values()) {
+      const first = group[0];
+      const material = SURFACE_MATERIALS[first.material];
+      const mesh = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(0.96, 0.96),
+        new THREE.MeshStandardMaterial({
+          color: material.color,
+          roughness: material.roughness,
+          metalness: 0,
+          transparent: true,
+          opacity: 0.34 + first.intensity * 0.14
+        }),
+        group.length
+      );
+      group.forEach((tile, index) => {
+        const center = cellToWorld(tile.cell);
+        matrix.compose(new THREE.Vector3(center.x, layerToBaseY(tile.heightLayer) + 0.018, center.z), rotation, scale);
+        mesh.setMatrixAt(index, matrix);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.receiveShadow = true;
+      this.root.add(mesh);
     }
   }
 
@@ -421,9 +493,47 @@ export class ThreeValidationRenderer {
     mesh.castShadow = true;
     this.root.add(mesh);
 
+    const accent = new THREE.Mesh(
+      new THREE.TorusGeometry(actor.radius * 0.72, Math.max(0.012, actor.radius * 0.08), 8, 20),
+      materialColor(actor.visual?.accentColor ?? color, 0.44)
+    );
+    accent.position.set(actor.position.x, actor.baseY + actor.height + 0.02, actor.position.z);
+    accent.rotation.x = Math.PI * 0.5;
+    this.root.add(accent);
+
     if (debug.enabled && debug.pivots) this.drawPivot(frame, color);
     if (debug.enabled && debug.axes) this.drawFrameAxes(frame, actor.kind === "boss" ? 0.9 : 0.6);
     if (debug.enabled && debug.facing) this.drawFacingArrow(frame, actor.kind === "boss" ? 1.4 : 1, color);
+  }
+
+  private drawActors(actors: Actor[], debug: ReturnType<ThreeRendererOptions["getDebugOptions"]>): void {
+    if (actors.length <= 32 || debug.enabled) {
+      for (const actor of actors) this.drawActor(actor, debug);
+      return;
+    }
+
+    const groups = new Map<string, Actor[]>();
+    for (const actor of actors) {
+      const key = `${actor.kind}:${actor.visual?.variant ?? "default"}:${actor.radius.toFixed(3)}:${actor.height.toFixed(3)}`;
+      groups.set(key, [...(groups.get(key) ?? []), actor]);
+    }
+
+    const matrix = new THREE.Matrix4();
+    for (const group of groups.values()) {
+      const first = group[0];
+      const mesh = new THREE.InstancedMesh(
+        new THREE.CylinderGeometry(first.radius, first.radius, first.height, 12),
+        materialColor(actorColor(first), 0.62),
+        group.length
+      );
+      group.forEach((actor, index) => {
+        matrix.makeTranslation(actor.position.x, actor.baseY + actor.height * 0.5, actor.position.z);
+        mesh.setMatrixAt(index, matrix);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.castShadow = true;
+      this.root.add(mesh);
+    }
   }
 
   private drawDebugContact(contact: ReturnType<ThreeRendererOptions["getDebugContacts"]>[number]): void {

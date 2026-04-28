@@ -1,6 +1,6 @@
 # Demarcacao de Conformidade das 4000 Linhas
 
-Gerado em: 2026-04-27T15:27:48.681Z
+Gerado em: 2026-04-28T03:03:39.177Z
 
 Este relatorio demarca cada linha do documento auxiliar copiado em `docs/contracts/DOCUMENTO_AUXILIAR_4000_LINHAS.md`.
 A classificacao e conservadora: `OK` quando a v3 cobre o contrato por codigo/teste/screenshot; `PARCIAL` quando ha base funcional mas falta produto completo; `FORA_V3` quando o proprio contrato aponta tecnologia futura; `INFO` quando a linha e contexto.

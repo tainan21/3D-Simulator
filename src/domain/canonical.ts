@@ -140,6 +140,17 @@ export type ActorVisualProfile = Readonly<{
   silhouette: ActorSilhouette;
 }>;
 
+export type ActorAttackGeometry = "circle" | "capsule" | "cone" | "projectile" | "ring";
+
+export type ActorCombatProfile = Readonly<{
+  attackId: string;
+  behaviorId: string;
+  geometry: ActorAttackGeometry;
+  range: number;
+  cooldown: number;
+  damage: number;
+}>;
+
 export const SURFACE_MATERIALS: Record<SurfaceMaterialKind, SurfaceMaterialProfile> = {
   stone: { displayName: "Pedra fria", color: 0x40506b, accentColor: 0x9eb7ff, roughness: 0.92, walkCost: 1, tags: ["floor", "neutral"] },
   moss: { displayName: "Musgo leve", color: 0x4e8f62, accentColor: 0x9df09f, roughness: 0.98, walkCost: 1.05, tags: ["floor", "organic"] },
@@ -169,6 +180,7 @@ export type Actor = Readonly<{
   baseY: number;
   heightLayer: HeightLayer;
   visual: ActorVisualProfile;
+  combatProfile?: ActorCombatProfile;
   properties: GameObjectProperties;
 }>;
 
@@ -185,6 +197,7 @@ export type PieceHeightOptions = Readonly<{
 export type ActorOptions = PieceHeightOptions &
   Readonly<{
     visual?: ActorVisualVariant | ActorVisualProfile;
+    combatProfile?: ActorCombatProfile;
   }>;
 
 export const CANONICAL_DIMENSIONS = {
@@ -539,6 +552,7 @@ export function createActor(
     baseY,
     heightLayer,
     visual: resolveActorVisual(kind, options.visual),
+    combatProfile: options.combatProfile,
     properties: propertiesFor(kind)
   };
 }

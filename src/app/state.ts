@@ -1,6 +1,8 @@
 import { DEFAULT_DEBUG_OVERLAYS } from "../domain/debug";
 import { createUniverseState, materializeUniverseRegion } from "../domain/universe";
+import { DEFAULT_CHARACTER_ARCHETYPE } from "../domain/entityArchetype";
 import { materializeRuntimeSession, type RuntimeBakeArtifact } from "../runtime/materialize";
+import { loadCreatedMobCache } from "../infrastructure/createdMobCache";
 import { computeWorldAnalysis } from "../simulation/analysis";
 import { DEFAULT_AI_POLICY } from "../simulation/aiPolicy";
 import { createReplayState } from "../simulation/replay";
@@ -8,6 +10,7 @@ import { editorFromWorld, createPhaseWorld } from "../simulation/worldState";
 import { createStudioSession } from "../studio/session";
 import type {
   AppStores,
+  CharacterStudioState,
   CameraStateSeed,
   HarnessState,
   PerformancePreset,
@@ -22,6 +25,7 @@ import { createStore } from "./store";
 
 const STORAGE_KEYS = {
   settings: "rogue-shell-settings",
+  characters: "rogue-shell-characters",
   runtimeArtifact: "rogue-shell-runtime-artifact",
   replayRecords: "rogue-shell-replays"
 } as const;
@@ -110,6 +114,21 @@ function loadReplayRecords(): ReplayStoreState {
   return { records };
 }
 
+function loadCharacters(): CharacterStudioState {
+  const stored = readJson<Partial<CharacterStudioState>>(STORAGE_KEYS.characters);
+  const cachedMobs = loadCreatedMobCache().records.map((record) => record.archetype);
+  const storedLibrary = stored?.library?.length ? stored.library : [DEFAULT_CHARACTER_ARCHETYPE];
+  const library = [...cachedMobs, ...storedLibrary.filter((entry) => !cachedMobs.some((mob) => mob.id === entry.id))];
+  const archetype = stored?.archetype ?? library[0] ?? DEFAULT_CHARACTER_ARCHETYPE;
+  return {
+    archetype,
+    library,
+    selectedId: stored?.selectedId ?? archetype.id,
+    view: stored?.view ?? "25d",
+    camera3D: stored?.camera3D ?? { ...DEFAULT_STUDIO_CAMERA }
+  };
+}
+
 export function persistRuntimeArtifact(artifact?: RuntimeBakeArtifact): void {
   if (!artifact) return;
   writeJson(STORAGE_KEYS.runtimeArtifact, artifact);
@@ -125,6 +144,7 @@ export function createAppStores(): AppStores {
   const phasesMaterialized = materializeUniverseRegion(universe);
   const phasesWorld = phasesMaterialized.world;
   const studioSession = createStudioSession();
+  const characters = loadCharacters();
   const storedArtifact = loadRuntimeArtifact();
   const runtime = storedArtifact ? materializeRuntimeSession(storedArtifact) : undefined;
 
@@ -138,6 +158,9 @@ export function createAppStores(): AppStores {
     debugOverlays: cloneDefaultDebugOverlays(),
     camera3D: { ...DEFAULT_STUDIO_CAMERA }
   });
+
+  const characterStudioStore = createStore<CharacterStudioState>(characters);
+  characterStudioStore.subscribe((next) => writeJson(STORAGE_KEYS.characters, next));
 
   const harnessStore = createStore<HarnessState>({
     debugOverlays: { ...cloneDefaultDebugOverlays(), enabled: true, diagnostics: true, bounds: true },
@@ -180,6 +203,7 @@ export function createAppStores(): AppStores {
   return {
     settingsStore,
     studioStore,
+    characterStudioStore,
     harnessStore,
     phasesStore,
     runtimeStore,

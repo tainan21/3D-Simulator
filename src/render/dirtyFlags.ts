@@ -35,6 +35,7 @@ function geometryKey(world: WorldState): string {
     pieces: world.pieces,
     towers: world.towers,
     connectors: world.connectors,
+    surfaceTiles: world.surfaceTiles ?? [],
     baseCore: world.baseCore
   });
 }

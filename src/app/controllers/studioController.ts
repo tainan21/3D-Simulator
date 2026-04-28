@@ -1,14 +1,19 @@
 import { BaseEditor, type PlacementTool } from "../../editor/baseEditor";
 import {
+  ACTOR_VISUAL_PROFILES,
   createActor,
   pieceHorizontalBounds,
   pieceSockets,
+  SURFACE_MATERIALS,
   type Actor,
   type ActorKind,
+  type ActorVisualVariant,
   type BaseCore,
   type BasePiece,
   type HeightConnector,
   type HeightLayer,
+  type SurfaceIntensity,
+  type SurfaceMaterialKind,
   type TowerPiece
 } from "../../domain/canonical";
 import { buildBaseGraph } from "../../domain/baseGraph";
@@ -27,6 +32,9 @@ import { enemyPreviewSvg } from "../../studio/enemies";
 import { createGeometryParityReport } from "../../studio/geometryParity";
 import { applyStudioRecipe, STUDIO_RECIPES, type StudioRecipeId } from "../../studio/recipes";
 import { STUDIO_SCENARIOS } from "../../studio/scenarios";
+import { ACTOR_VISUAL_BRUSHES, paintSurfaceTile, pointToSurfaceCell, SURFACE_BRUSHES, withActorVisual } from "../../studio/surfaceStudio";
+import { materializeCreatedMobs } from "../../domain/createdMob";
+import { createdMobSyncStatus, loadCreatedMobCache } from "../../infrastructure/createdMobCache";
 import {
   materializeStudioTimelineWorld,
   replayStudioSession,
@@ -47,7 +55,7 @@ import {
 import type { AppRoute, AppSurfaceContext, SurfaceHandle, ToolMode, ViewMode } from "../contracts";
 import { createCleanupBag, createKeyboardState, type RendererHandle, updatePerformanceSnapshot } from "./common";
 
-const BASE_TOOLS: ToolMode[] = ["fence", "fence-tl", "gate", "tower", "ramp", "platform-link", "erase"];
+const BASE_TOOLS: ToolMode[] = ["surface", "fence", "fence-tl", "gate", "tower", "ramp", "platform-link", "erase"];
 const ACTOR_TOOLS: ToolMode[] = ["player", "enemy", "dwarf", "boss"];
 const STUDIO_CAMERA_MODES: CameraMode3D[] = ["tactical", "inspection", "first-person"];
 const STUDIO_VIEWS: ViewMode[] = ["2d", "25d", "3d"];
@@ -74,6 +82,13 @@ const OVERLAY_KEYS: Array<Exclude<keyof DebugOverlayOptions, "enabled">> = [
 ];
 
 type LayerFilter = "all" | HeightLayer;
+type StudioChromeMode = "compact" | "standard" | "immersive";
+type StudioThemeMode = "dark-core" | "neon-tech" | "graphite-pro" | "midnight-blue";
+type StudioWorkMode = "builder" | "combat" | "logic" | "performance";
+type StudioPanelSize = "left" | "side" | "bottom";
+
+const STUDIO_UI_STORAGE_KEY = "rogue-shell-studio-ui";
+const STUDIO_PANEL_RAIL = 56;
 
 export class StudioSurfaceController {
   private readonly cleanups = createCleanupBag();
@@ -93,6 +108,29 @@ export class StudioSurfaceController {
   private isolateSelection = false;
   private ghostPreviousFrame = false;
   private issueCursor = -1;
+  private surfaceBrush: SurfaceMaterialKind = "stone";
+  private surfaceIntensity: SurfaceIntensity = 2;
+  private actorVisualBrush: ActorVisualVariant = "raider";
+  private lastSurfacePaintKey?: string;
+  private leftPanelWidth = this.readUiNumber("leftPanelWidth", 304);
+  private sidePanelWidth = this.readUiNumber("sidePanelWidth", 344);
+  private bottomPanelHeight = this.readUiNumber("bottomPanelHeight", 150);
+  private leftPanelCollapsed = this.readUiBoolean("leftPanelCollapsed", true);
+  private sidePanelCollapsed = this.readUiBoolean("sidePanelCollapsed", true);
+  private chromeMode: StudioChromeMode = this.readUiValue("chromeMode", "standard", ["compact", "standard", "immersive"]);
+  private themeMode: StudioThemeMode = this.readUiValue("themeMode", "graphite-pro", ["dark-core", "neon-tech", "graphite-pro", "midnight-blue"]);
+  private workMode: StudioWorkMode = this.readUiValue("workMode", "builder", ["builder", "combat", "logic", "performance"]);
+  private paletteSearch = "";
+  private commandPaletteOpen = false;
+  private cleanMode = false;
+  private presentationMode = false;
+  private resizingPanel?: {
+    panel: StudioPanelSize;
+    startX: number;
+    startY: number;
+    startWidth: number;
+    startHeight: number;
+  };
 
   constructor(
     private readonly host: HTMLElement,
@@ -134,6 +172,12 @@ export class StudioSurfaceController {
     this.host.innerHTML = "";
   }
 
+  private destroyRenderersForRemount(): void {
+    while (this.rendererCanvasCleanups.length > 0) this.rendererCanvasCleanups.pop()?.();
+    this.renderers.forEach((renderer) => renderer.destroy());
+    this.renderers.clear();
+  }
+
   private get state() {
     return this.context.stores.studioStore.getState();
   }
@@ -146,36 +190,102 @@ export class StudioSurfaceController {
     return this.state.session;
   }
 
+  private readUiPrefs(): Record<string, unknown> {
+    try {
+      return JSON.parse(window.localStorage.getItem(STUDIO_UI_STORAGE_KEY) ?? "{}") as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  private writeUiPrefs(patch: Record<string, unknown>): void {
+    try {
+      window.localStorage.setItem(STUDIO_UI_STORAGE_KEY, JSON.stringify({ ...this.readUiPrefs(), ...patch }));
+    } catch {
+      // Studio preferences are convenience-only.
+    }
+  }
+
+  private readUiNumber(key: string, fallback: number): number {
+    const value = this.readUiPrefs()[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  }
+
+  private readUiBoolean(key: string, fallback: boolean): boolean {
+    const value = this.readUiPrefs()[key];
+    return typeof value === "boolean" ? value : fallback;
+  }
+
+  private readUiValue<T extends string>(key: string, fallback: T, allowed: readonly T[]): T {
+    const value = this.readUiPrefs()[key];
+    return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+  }
+
+  private studioShellClasses(): string {
+    return [
+      "studio-shell",
+      `studio-view-${this.state.view}`,
+      `studio-chrome-${this.chromeMode}`,
+      `studio-theme-${this.themeMode}`,
+      `studio-work-${this.workMode}`,
+      this.leftPanelCollapsed ? "left-collapsed" : "",
+      this.sidePanelCollapsed ? "side-collapsed" : "",
+      this.cleanMode ? "clean-mode" : "",
+      this.presentationMode ? "presentation-mode" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  private panelStyleVars(): string {
+    return [
+      `--studio-left-width:${this.leftPanelWidth}px`,
+      `--studio-side-width:${this.sidePanelWidth}px`,
+      `--studio-bottom-height:${this.bottomPanelHeight}px`,
+      `--studio-left-active:${this.leftPanelCollapsed ? STUDIO_PANEL_RAIL : this.leftPanelWidth}px`,
+      `--studio-side-active:${this.sidePanelCollapsed ? STUDIO_PANEL_RAIL : this.sidePanelWidth}px`,
+      `--studio-panel-rail:${STUDIO_PANEL_RAIL}px`
+    ].join(";");
+  }
+
   private renderFrame(): void {
     this.host.innerHTML = `
-      <section class="studio-shell studio-view-${this.state.view}" data-testid="studio-shell">
-        <nav class="studio-route-tabs" data-testid="workspace-menu">
-          <button data-route="/studio">Studio</button>
-          <button data-route="/phases">Fases</button>
-          <button data-route="/runtime">Runtime</button>
-        </nav>
+      <section class="${this.studioShellClasses()}" style="${this.panelStyleVars()}" data-testid="studio-shell">
         <header class="studio-topbar">
           <div class="studio-title-block">
-            <div class="brand">Studio Geometrico</div>
-            <div id="studio-status" class="status-line"></div>
+            <div class="studio-product-mark">
+              <span class="studio-product-sigil" aria-hidden="true">RG</span>
+              <div>
+                <div class="brand">Studio Geometrico</div>
+                <div id="studio-status" class="status-line"></div>
+              </div>
+            </div>
           </div>
+          <nav class="studio-route-tabs" data-testid="workspace-menu">
+            <button data-route="/studio" class="active">Studio Base</button>
+            <button data-route="/characters">Chars</button>
+            <button data-route="/character-forge">Forge</button>
+            <button data-route="/phases">Fases</button>
+            <button data-route="/runtime">Runtime</button>
+          </nav>
           <div class="studio-view-switch" aria-label="Studio view switch">
             ${STUDIO_VIEWS.map((view) => `<button data-studio-view="${view}" class="${this.state.view === view ? "active" : ""}">${this.viewLabel(view)}</button>`).join("")}
           </div>
           <div class="studio-toolbar" data-testid="studio-toolbar">
-            <label>Scenario
+            <button class="studio-command-button" data-studio-action="command-palette">CTRL K</button>
+            <label class="studio-field studio-scenario-field">Scene
               <select data-studio-field="scenario">
                 ${STUDIO_SCENARIOS.map((scenario) => `<option value="${scenario.id}" ${scenario.id === this.session.scenarioId ? "selected" : ""}>${scenario.name}</option>`).join("")}
               </select>
             </label>
-            <label>Heatmap
+            <label class="studio-field">Heat
               <select data-studio-field="heatmap">
                 ${(["pressure", "coverage", "chokepoint", "vulnerability", "dead-zone", "flow"] as const)
                   .map((entry) => `<option value="${entry}" ${entry === this.session.heatmapLayer ? "selected" : ""}>${entry}</option>`)
                   .join("")}
               </select>
             </label>
-            <label>Layer
+            <label class="studio-field">Layer
               <select data-studio-field="layer-filter">
                 <option value="all" ${this.layerFilter === "all" ? "selected" : ""}>all</option>
                 <option value="0" ${this.layerFilter === 0 ? "selected" : ""}>0</option>
@@ -183,40 +293,36 @@ export class StudioSurfaceController {
                 <option value="2" ${this.layerFilter === 2 ? "selected" : ""}>2+</option>
               </select>
             </label>
-            <button data-studio-action="play">${this.session.timeline.playing ? "Pause" : "Play"}</button>
+            <div class="studio-work-switch" aria-label="Work mode">
+              ${(["builder", "combat", "logic", "performance"] as StudioWorkMode[]).map((mode) => `<button data-work-mode="${mode}" class="${this.workMode === mode ? "active" : ""}">${this.workModeLabel(mode)}</button>`).join("")}
+            </div>
+            <button data-studio-action="play" class="${this.session.timeline.playing ? "active" : ""}">${this.session.timeline.playing ? "Pause" : "Play"}</button>
             <button data-studio-action="step">Step</button>
             <button data-studio-action="record">${this.session.replay.session?.status === "recording" ? "Stop Rec" : "Record"}</button>
             <button data-studio-action="replay">Replay</button>
-            <button data-studio-action="bake-runtime">Bake</button>
             <button data-studio-action="toggle-gate">Gate</button>
+            <button data-studio-action="snapshot">Snapshot</button>
+            <button data-studio-action="bake-runtime" class="primary-action">Bake</button>
+            <button data-studio-action="fullscreen">Full</button>
+            <label class="studio-field">Chrome
+              <select data-studio-field="chrome-mode">
+                ${(["compact", "standard", "immersive"] as StudioChromeMode[]).map((mode) => `<option value="${mode}" ${mode === this.chromeMode ? "selected" : ""}>${mode}</option>`).join("")}
+              </select>
+            </label>
+            <label class="studio-field">Theme
+              <select data-studio-field="theme-mode">
+                ${(["dark-core", "neon-tech", "graphite-pro", "midnight-blue"] as StudioThemeMode[]).map((mode) => `<option value="${mode}" ${mode === this.themeMode ? "selected" : ""}>${this.themeLabel(mode)}</option>`).join("")}
+              </select>
+            </label>
           </div>
         </header>
         <section class="studio-layout">
           <aside id="studio-left" class="studio-left-panel" data-testid="studio-left">
-            <section class="studio-panel-block">
-              <h2>Menu da base</h2>
-              <div class="studio-palette-grid">
-                ${BASE_TOOLS.map((tool) => this.toolPaletteButton(tool)).join("")}
-              </div>
-            </section>
-            <section class="studio-panel-block">
-              <h2>Menu do Studio</h2>
-              <p class="muted">Adicionar mobs e validar escala/altura no mesmo mundo canonico.</p>
-              <div class="studio-palette-grid">
-                ${ACTOR_TOOLS.map((tool) => this.toolPaletteButton(tool)).join("")}
-              </div>
-            </section>
-            <section class="studio-panel-block">
-              <details>
-                <summary>Objetos</summary>
-              <div class="studio-selection-list compact">
-                ${this.session.world.pieces.map((piece) => `<button data-select-kind="piece" data-select-id="${piece.id}">${piece.properties.displayName} ${piece.id}</button>`).join("")}
-                ${this.session.world.towers.map((tower) => `<button data-select-kind="tower" data-select-id="${tower.id}">${tower.properties.displayName} ${tower.id}</button>`).join("")}
-                ${this.session.world.actors.map((actor) => `<button data-select-kind="actor" data-select-id="${actor.id}">${actor.properties.displayName} ${actor.id}</button>`).join("")}
-                <button data-select-kind="base-core" data-select-id="base-core">${this.session.world.baseCore.properties.displayName}</button>
-              </div>
-              </details>
-            </section>
+            <div class="studio-panel-rail"><span>Tools</span><button data-panel-toggle="left">${this.leftPanelCollapsed ? "Open" : "Hide"}</button></div>
+            <div class="studio-panel-content">
+              ${this.leftPanelHtml()}
+            </div>
+            <div class="studio-resize-handle studio-resize-left" data-resize-handle="left" aria-hidden="true"></div>
           </aside>
           <section class="studio-center">
             <div class="studio-harness" data-testid="studio-harness">
@@ -242,11 +348,126 @@ export class StudioSurfaceController {
                 <div id="studio-host-3d" class="studio-canvas-host" data-testid="studio-host-3d"></div>
               </article>
             </div>
-            <div id="studio-bottom" class="studio-bottom-panel" data-testid="studio-bottom"></div>
+            <div id="studio-bottom" class="studio-bottom-panel" data-testid="studio-bottom">
+              <div class="studio-resize-handle studio-resize-bottom" data-resize-handle="bottom" aria-hidden="true"></div>
+            </div>
           </section>
-          <aside id="studio-side" class="studio-side-panel" data-testid="studio-side"></aside>
+          <aside id="studio-side" class="studio-side-panel" data-testid="studio-side">
+            <div class="studio-resize-handle studio-resize-side" data-resize-handle="side" aria-hidden="true"></div>
+          </aside>
         </section>
+        ${this.commandPaletteOpen ? this.commandPaletteHtml() : ""}
+        <div class="studio-toast">Saved locally</div>
         <pre id="studio-signature" class="sr-only" data-testid="canonical-signature"></pre>
+      </section>
+    `;
+  }
+
+  private leftPanelHtml(): string {
+    const query = this.paletteSearch.trim().toLowerCase();
+    const matches = (label: string, tags: string[] = []) => !query || [label, ...tags].some((entry) => entry.toLowerCase().includes(query));
+    const baseTools = BASE_TOOLS.filter((tool) => matches(this.toolLabel(tool), [tool, "base", "terrain"]));
+    const actorTools = ACTOR_TOOLS.filter((tool) => matches(this.toolLabel(tool), [tool, "enemy", "boss", "encounter"]));
+    const logicTools = (["ramp", "platform-link", "gate", "erase"] as ToolMode[]).filter((tool) => matches(this.toolLabel(tool), [tool, "logic", "trigger", "flow"]));
+    const objectButtons = [
+      ...this.session.world.pieces.map((piece) => ({ kind: "piece", id: piece.id, label: piece.properties.displayName, tag: piece.kind })),
+      ...this.session.world.towers.map((tower) => ({ kind: "tower", id: tower.id, label: tower.properties.displayName, tag: "tower" })),
+      ...this.session.world.actors.map((actor) => ({ kind: "actor", id: actor.id, label: actor.properties.displayName, tag: actor.kind })),
+      { kind: "base-core", id: "base-core", label: this.session.world.baseCore.properties.displayName, tag: "core" }
+    ].filter((entry) => matches(entry.label, [entry.id, entry.tag]));
+
+    return `
+      <div class="studio-library-head">
+        <div>
+          <h2>Library</h2>
+          <span>${BASE_TOOLS.length + ACTOR_TOOLS.length} tools | ${objectButtons.length} objects</span>
+        </div>
+        <button data-studio-action="command-palette">Find</button>
+      </div>
+      <label class="studio-search-box">
+        <span>Search</span>
+        <input data-studio-field="palette-search" value="${this.paletteSearch}" placeholder="enemy, gate, fx..." />
+      </label>
+      <div class="studio-chip-row" aria-label="Favorites and recents">
+        <button data-tool="fence" class="${this.state.tool === "fence" ? "active" : ""}">Fav Fence</button>
+        <button data-tool="gate" class="${this.state.tool === "gate" ? "active" : ""}">Recent Gate</button>
+        <button data-tool="enemy" class="${this.state.tool === "enemy" ? "active" : ""}">Enemy</button>
+      </div>
+      ${this.toolCategoryHtml("Base", "shell, walls, gates", baseTools)}
+      <section class="studio-panel-block studio-category">
+        <details open>
+          <summary><span>Terrain</span><em>surface paint</em></summary>
+          <div class="studio-brush-grid compact-brush-grid">
+            ${SURFACE_BRUSHES.map((brush) => `<button data-surface-brush="${brush.id}" class="${this.surfaceBrush === brush.id ? "active" : ""}" style="--swatch:${this.cssHex(SURFACE_MATERIALS[brush.id].color)}"><span></span><strong>${brush.label}</strong><small>${brush.intent}</small></button>`).join("")}
+          </div>
+          <div class="segmented-row">
+            ${([1, 2, 3] as SurfaceIntensity[]).map((intensity) => `<button data-surface-intensity="${intensity}" class="${this.surfaceIntensity === intensity ? "active" : ""}">I${intensity}</button>`).join("")}
+          </div>
+        </details>
+      </section>
+      ${this.toolCategoryHtml("Props", "height connectors", logicTools)}
+      ${this.toolCategoryHtml("Enemies", "actors and bosses", actorTools)}
+      <section class="studio-panel-block studio-category">
+        <details>
+          <summary><span>FX</span><em>visual profiles</em></summary>
+          <div class="studio-brush-grid compact-brush-grid">
+            ${ACTOR_VISUAL_BRUSHES.map((brush) => `<button data-actor-visual="${brush.id}" class="${this.actorVisualBrush === brush.id ? "active" : ""}" style="--swatch:${this.cssHex(ACTOR_VISUAL_PROFILES[brush.id].primaryColor)}"><span></span><strong>${brush.label}</strong><small>${brush.intent}</small></button>`).join("")}
+          </div>
+        </details>
+      </section>
+      <section class="studio-panel-block studio-category">
+        <details>
+          <summary><span>Logic</span><em>scenario kits</em></summary>
+          <div class="studio-recipe-grid">
+            ${STUDIO_RECIPES.map((recipe) => `<button data-studio-recipe="${recipe.id}"><strong>${recipe.label}</strong><span>${recipe.intent}</span></button>`).join("")}
+          </div>
+        </details>
+      </section>
+      <section class="studio-panel-block studio-category">
+        <details>
+          <summary><span>Saved Kits</span><em>${objectButtons.length} scene items</em></summary>
+          <div class="studio-selection-list compact">
+            ${objectButtons.map((entry) => `<button data-select-kind="${entry.kind}" data-select-id="${entry.id}"><span class="studio-kind-dot type-${entry.tag}"></span>${entry.label}<small>${entry.id}</small></button>`).join("")}
+          </div>
+        </details>
+      </section>
+    `;
+  }
+
+  private toolCategoryHtml(title: string, subtitle: string, tools: ToolMode[]): string {
+    return `
+      <section class="studio-panel-block studio-category">
+        <details open>
+          <summary><span>${title}</span><em>${subtitle}</em></summary>
+          <div class="studio-palette-grid">
+            ${tools.map((tool) => this.toolPaletteButton(tool)).join("") || `<p class="muted">No tools match this search.</p>`}
+          </div>
+        </details>
+      </section>
+    `;
+  }
+
+  private commandPaletteHtml(): string {
+    const commands = [
+      ["create-enemy", "Create enemy", "Tool"],
+      ["duplicate-gate", "Select first gate", "Selection"],
+      ["open-runtime", "Open runtime", "Route"],
+      ["toggle-heatmap", "Toggle heatmap", "Overlay"],
+      ["snapshot", "Snapshot scene", "Timeline"],
+      ["export-scene", "Bake runtime", "Export"],
+      ["clean-mode", "Toggle clean mode", "View"],
+      ["presentation-mode", "Presentation mode", "View"]
+    ];
+    return `
+      <div class="studio-command-scrim" data-studio-action="close-command"></div>
+      <section class="studio-command-palette" role="dialog" aria-label="Command palette">
+        <div class="studio-command-search">
+          <span>CTRL K</span>
+          <input value="${this.paletteSearch}" data-studio-field="palette-search" placeholder="Run action or find geometry..." autofocus />
+        </div>
+        <div class="studio-command-list">
+          ${commands.map(([id, label, group]) => `<button data-command="${id}"><strong>${label}</strong><span>${group}</span></button>`).join("")}
+        </div>
       </section>
     `;
   }
@@ -265,6 +486,19 @@ export class StudioSurfaceController {
       this.updateHud(true);
     };
     const onPointerDown = (event: PointerEvent) => {
+      const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-resize-handle]");
+      if (handle?.dataset.resizeHandle) {
+        event.preventDefault();
+        this.resizingPanel = {
+          panel: handle.dataset.resizeHandle as StudioPanelSize,
+          startX: event.clientX,
+          startY: event.clientY,
+          startWidth: handle.dataset.resizeHandle === "side" ? this.sidePanelWidth : this.leftPanelWidth,
+          startHeight: this.bottomPanelHeight
+        };
+        this.host.querySelector(".studio-shell")?.classList.add("is-resizing");
+        return;
+      }
       if (this.state.view !== "3d") return;
       if (this.state.camera3D.mode === "first-person") {
         const canvas = this.host.querySelector<HTMLCanvasElement>("#studio-host-3d canvas");
@@ -275,6 +509,10 @@ export class StudioSurfaceController {
       this.lastPointer = { x: event.clientX, y: event.clientY };
     };
     const onPointerMove = (event: PointerEvent) => {
+      if (this.resizingPanel) {
+        this.resizeStudioPanel(event);
+        return;
+      }
       if (!this.isDraggingCamera || !this.lastPointer || this.state.camera3D.mode === "first-person") return;
       const dx = event.clientX - this.lastPointer.x;
       const dy = event.clientY - this.lastPointer.y;
@@ -289,6 +527,15 @@ export class StudioSurfaceController {
       }));
     };
     const onPointerUp = () => {
+      if (this.resizingPanel) {
+        this.writeUiPrefs({
+          leftPanelWidth: this.leftPanelWidth,
+          sidePanelWidth: this.sidePanelWidth,
+          bottomPanelHeight: this.bottomPanelHeight
+        });
+      }
+      this.resizingPanel = undefined;
+      this.host.querySelector(".studio-shell")?.classList.remove("is-resizing");
       this.isDraggingCamera = false;
       this.lastPointer = undefined;
     };
@@ -305,24 +552,84 @@ export class StudioSurfaceController {
         }
       }));
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        this.commandPaletteOpen = true;
+        this.destroyRenderersForRemount();
+        this.renderFrame();
+        this.mountRenderers();
+        this.updateHud(true);
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        this.cleanMode = !this.cleanMode;
+        this.updateChromeShell();
+        return;
+      }
+      if (event.key === "Escape" && this.commandPaletteOpen) {
+        this.commandPaletteOpen = false;
+        this.destroyRenderersForRemount();
+        this.renderFrame();
+        this.mountRenderers();
+        this.updateHud(true);
+      }
+    };
 
     this.host.addEventListener("click", onClick);
     this.host.addEventListener("change", onChange);
     this.host.addEventListener("input", onInput);
     this.host.querySelector("#studio-host-3d")?.addEventListener("wheel", onWheel as EventListener, { passive: false });
-    this.host.querySelector("#studio-host-3d")?.addEventListener("pointerdown", onPointerDown as EventListener);
+    this.host.addEventListener("pointerdown", onPointerDown as EventListener);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("keydown", onKeyDown);
 
     this.cleanups.add(() => this.host.removeEventListener("click", onClick));
     this.cleanups.add(() => this.host.removeEventListener("change", onChange));
     this.cleanups.add(() => this.host.removeEventListener("input", onInput));
     this.cleanups.add(() => this.host.querySelector("#studio-host-3d")?.removeEventListener("wheel", onWheel as EventListener));
-    this.cleanups.add(() => this.host.querySelector("#studio-host-3d")?.removeEventListener("pointerdown", onPointerDown as EventListener));
+    this.cleanups.add(() => this.host.removeEventListener("pointerdown", onPointerDown as EventListener));
     this.cleanups.add(() => window.removeEventListener("pointermove", onPointerMove));
     this.cleanups.add(() => window.removeEventListener("pointerup", onPointerUp));
     this.cleanups.add(() => window.removeEventListener("mousemove", onMouseMove));
+    this.cleanups.add(() => window.removeEventListener("keydown", onKeyDown));
+  }
+
+  private resizeStudioPanel(event: PointerEvent): void {
+    if (!this.resizingPanel) return;
+    const { panel, startX, startY, startWidth, startHeight } = this.resizingPanel;
+    if (panel === "left") {
+      this.leftPanelWidth = clamp(startWidth + event.clientX - startX, 220, 420);
+      this.leftPanelCollapsed = false;
+    } else if (panel === "side") {
+      this.sidePanelWidth = clamp(startWidth - (event.clientX - startX), 260, 560);
+      this.sidePanelCollapsed = false;
+    } else {
+      this.bottomPanelHeight = clamp(startHeight - (event.clientY - startY), 118, 420);
+    }
+    this.updatePanelVars();
+    this.resizeRenderersSoon();
+  }
+
+  private updatePanelVars(): void {
+    const shell = this.host.querySelector<HTMLElement>(".studio-shell");
+    if (!shell) return;
+    shell.style.setProperty("--studio-left-width", `${this.leftPanelWidth}px`);
+    shell.style.setProperty("--studio-side-width", `${this.sidePanelWidth}px`);
+    shell.style.setProperty("--studio-bottom-height", `${this.bottomPanelHeight}px`);
+    shell.style.setProperty("--studio-left-active", `${this.leftPanelCollapsed ? STUDIO_PANEL_RAIL : this.leftPanelWidth}px`);
+    shell.style.setProperty("--studio-side-active", `${this.sidePanelCollapsed ? STUDIO_PANEL_RAIL : this.sidePanelWidth}px`);
+  }
+
+  private updateChromeShell(): void {
+    const shell = this.host.querySelector<HTMLElement>(".studio-shell");
+    if (!shell) return;
+    shell.className = this.studioShellClasses();
+    this.updatePanelVars();
+    this.resizeRenderersSoon();
   }
 
   private provider(): RenderDataProvider {
@@ -357,6 +664,9 @@ export class StudioSurfaceController {
         getDraftSegment: () => this.draftSegment(),
         onWorldClick: (point) => this.handleWorldClick(point),
         onWorldHover: (point) => this.setState((current) => ({ ...current, hoverPoint: point })),
+        onWorldDrag: (point) => {
+          if (this.state.tool === "surface") this.handleWorldClick(point);
+        },
         interactionEnabled: true
       }) as unknown as RendererHandle;
       (renderer as unknown as PhaserGeometryRenderer).mount();
@@ -374,6 +684,9 @@ export class StudioSurfaceController {
         getDraftSegment: () => this.draftSegment(),
         onWorldClick: (point) => this.handleWorldClick(point),
         onWorldHover: (point) => this.setState((current) => ({ ...current, hoverPoint: point })),
+        onWorldDrag: (point) => {
+          if (this.state.tool === "surface") this.handleWorldClick(point);
+        },
         interactionEnabled: true
       }) as unknown as RendererHandle;
       (renderer as unknown as PhaserGeometryRenderer).mount();
@@ -454,24 +767,63 @@ export class StudioSurfaceController {
     const currentFrame = this.session.timeline.frames.find((frame) => frame.tick === this.session.timeline.tick) ?? this.session.timeline.frames.at(-1);
     const enemy = this.session.enemyWorkbench.archetype;
     const parity = createGeometryParityReport(this.session.world);
+    const surfaceCount = this.session.world.surfaceTiles?.length ?? 0;
+    const createdMobCache = loadCreatedMobCache();
+    const sync = createdMobSyncStatus(createdMobCache);
     return `
+      <div class="studio-resize-handle studio-resize-side" data-resize-handle="side" aria-hidden="true"></div>
+      <div class="studio-panel-rail studio-side-rail"><span>Inspect</span><button data-panel-toggle="side">${this.sidePanelCollapsed ? "Open" : "Hide"}</button></div>
+      <div class="studio-panel-content">
       <section class="studio-panel-block parity-gate ${parity.ok ? "ok" : "fail"}" data-testid="geometry-parity-gate">
-        <h2>Geometry parity gate</h2>
+        <h2>Runtime</h2>
         <dl>
           <dt>Status</dt><dd>${parity.ok ? "OK: 2D = 2.5D = 3D" : `FAIL: ${parity.mismatchedAdapters.join(" | ")}`}</dd>
           <dt>Objects</dt><dd>${parity.checks.map((check) => `${check.adapter}:${check.objectCount}`).join(" | ")}</dd>
+          <dt>Created mobs</dt><dd>${createdMobCache.records.length} | PG ${sync.cachedRows} | Blob ${sync.cachedBlobs}</dd>
           <dt>3D hash</dt><dd>${parity.baselineSignature.slice(0, 34)}...</dd>
         </dl>
       </section>
+      <section class="studio-panel-block created-mob-list" data-testid="studio-created-mobs">
+        <details open>
+          <summary>Mobs criados</summary>
+          <p class="muted">Roster vindo do Character Forge. O bake do Studio puxa estes mobs automaticamente.</p>
+          <div class="catalog-list">
+            ${
+              createdMobCache.records.length
+                ? createdMobCache.records
+                    .map(
+                      (record) => `
+                        <button data-route="/characters">
+                          <strong>${record.label}</strong>
+                          <span>${record.dnaCode} | ${record.archetype.kind} | ${record.archetype.attackId}</span>
+                        </button>
+                      `
+                    )
+                    .join("")
+                : `<div class="empty-state">Crie ou envie um mob no Character Forge.</div>`
+            }
+          </div>
+        </details>
+      </section>
       <section class="studio-panel-block">
-        <h2>Inspector canonico</h2>
+        <h2>Selection</h2>
         <dl>
           <dt>Selection</dt><dd>${selected ? `${selected.kind}:${selected.id}` : "none"}</dd>
           <dt>Type</dt><dd>${selectedPiece?.properties.type ?? selectedTower?.properties.type ?? selectedActor?.properties.type ?? selectedCore?.properties.type ?? "-"}</dd>
+        </dl>
+      </section>
+      <section class="studio-panel-block">
+        <h2>Transform</h2>
+        <dl>
           <dt>A/B</dt><dd>${selectedPiece ? `A(${selectedPiece.a.x},${selectedPiece.a.z}) B(${selectedPiece.b.x},${selectedPiece.b.z})` : "-"}</dd>
           <dt>Bounds</dt><dd>${selectedPiece ? JSON.stringify(pieceHorizontalBounds(selectedPiece)) : selectedActor ? `r=${selectedActor.radius} h=${selectedActor.height}` : "-"}</dd>
           <dt>Sockets</dt><dd>${selectedPiece ? pieceSockets(selectedPiece).map((socket) => `${socket.kind}@${socket.position.y.toFixed(1)}`).join(" | ") : selectedTower ? `anchor=(${selectedTower.anchor.x.toFixed(2)},${selectedTower.anchor.y.toFixed(2)},${selectedTower.anchor.z.toFixed(2)})` : "-"}</dd>
           <dt>Layer</dt><dd>${this.layerFilter}</dd>
+        </dl>
+      </section>
+      <section class="studio-panel-block">
+        <h2>Stats</h2>
+        <dl>
           <dt>Ghost</dt><dd>${this.ghostPreviousFrame ? "on" : "off"}</dd>
           <dt>Snapshot</dt><dd>${currentFrame ? `tick ${currentFrame.tick} | ${canonicalGeometrySignature(this.session.world).slice(0, 28)}...` : "-"}</dd>
         </dl>
@@ -479,7 +831,7 @@ export class StudioSurfaceController {
       </section>
       <section class="studio-panel-block">
         <details>
-          <summary>Validador + grafo</summary>
+          <summary>Behavior</summary>
         <dl>
           <dt>Nodes/edges</dt><dd>${graph.nodes.length} / ${graph.edges.length}</dd>
           <dt>Sockets</dt><dd>${graph.sockets.length}</dd>
@@ -488,9 +840,28 @@ export class StudioSurfaceController {
         </dl>
         </details>
       </section>
+      <section class="studio-panel-block surface-studio">
+        <details open>
+          <summary>Visual</summary>
+          <dl>
+            <dt>Surface tiles</dt><dd>${surfaceCount}</dd>
+            <dt>Brush</dt><dd>${SURFACE_MATERIALS[this.surfaceBrush].displayName} / ${this.surfaceIntensity}</dd>
+            <dt>Actor visual</dt><dd>${ACTOR_VISUAL_PROFILES[this.actorVisualBrush].variant}${selectedActor ? ` -> ${selectedActor.visual.variant}` : ""}</dd>
+          </dl>
+          <div class="studio-brush-grid">
+            ${SURFACE_BRUSHES.map((brush) => `<button data-surface-brush="${brush.id}" class="${this.surfaceBrush === brush.id ? "active" : ""}" style="--swatch:${this.cssHex(SURFACE_MATERIALS[brush.id].color)}"><span></span><strong>${brush.label}</strong><small>${brush.intent}</small></button>`).join("")}
+          </div>
+          <div class="segmented-row">
+            ${([1, 2, 3] as SurfaceIntensity[]).map((intensity) => `<button data-surface-intensity="${intensity}" class="${this.surfaceIntensity === intensity ? "active" : ""}">Nivel ${intensity}</button>`).join("")}
+          </div>
+          <div class="studio-brush-grid">
+            ${ACTOR_VISUAL_BRUSHES.map((brush) => `<button data-actor-visual="${brush.id}" class="${this.actorVisualBrush === brush.id ? "active" : ""}" style="--swatch:${this.cssHex(ACTOR_VISUAL_PROFILES[brush.id].primaryColor)}"><span></span><strong>${brush.label}</strong><small>${brush.intent}</small></button>`).join("")}
+          </div>
+        </details>
+      </section>
       <section class="studio-panel-block">
         <details>
-          <summary>Recipe builder</summary>
+          <summary>Saved Kits</summary>
         <div class="studio-recipe-grid">
           ${STUDIO_RECIPES.map((recipe) => `<button data-studio-recipe="${recipe.id}"><strong>${recipe.label}</strong><span>${recipe.intent}</span></button>`).join("")}
         </div>
@@ -498,7 +869,7 @@ export class StudioSurfaceController {
       </section>
       <section class="studio-panel-block">
         <details>
-          <summary>Workbench AI</summary>
+          <summary>Logic</summary>
         <div class="studio-slider-list">
           ${this.policySlider("fovDegrees", "FOV", this.session.aiWorkbench.policy.fovDegrees, 60, 160, 1)}
           ${this.policySlider("visionRange", "Vision", this.session.aiWorkbench.policy.visionRange, 3, 14, 0.5)}
@@ -513,7 +884,7 @@ export class StudioSurfaceController {
       </section>
       <section class="studio-panel-block">
         <details>
-          <summary>Enemy generator</summary>
+          <summary>Notes</summary>
         <label>Seed <input type="number" data-studio-field="enemy-seed" value="${this.session.enemyWorkbench.seed}" /></label>
         <div class="enemy-preview-grid" data-testid="enemy-previews">
           <div class="enemy-preview-card"><span>2D</span>${enemyPreviewSvg(enemy, "2d")}</div>
@@ -522,6 +893,7 @@ export class StudioSurfaceController {
         </div>
         </details>
       </section>
+      </div>
     `;
   }
 
@@ -555,6 +927,7 @@ export class StudioSurfaceController {
         <label>Armor
           <input type="number" min="0" step="1" data-object-prop="armor" value="${props.armor}" />
         </label>
+        ${selectedActor ? `<p class="muted">Visual canonico: ${selectedActor.visual.variant} / ${selectedActor.visual.silhouette}</p>` : ""}
         <div class="tag-row">${props.tags.map((tag) => `<span>${tag}</span>`).join("")}</div>
       </div>
     `;
@@ -565,9 +938,17 @@ export class StudioSurfaceController {
     const profiler = currentFrame?.profilerSample;
     const spark = this.session.timeline.frames.slice(-18).map((frame) => Math.round(Math.min(9, frame.profilerSample.analysisMs + frame.profilerSample.stepMs))).join(" ");
     return `
+      <div class="studio-resize-handle studio-resize-bottom" data-resize-handle="bottom" aria-hidden="true"></div>
       <section class="studio-bottom-grid">
         <div class="studio-panel-block">
           <h2>Timeline + replay</h2>
+          <div class="studio-transport-row">
+            <button data-studio-action="play" class="${this.session.timeline.playing ? "active" : ""}">${this.session.timeline.playing ? "Pause" : "Play"}</button>
+            <button data-studio-action="step">Step</button>
+            <button data-studio-action="record">${this.session.replay.session?.status === "recording" ? "Stop Rec" : "Record"}</button>
+            <button data-studio-action="replay">Replay</button>
+            <button data-studio-action="ghost-frame" class="${this.ghostPreviousFrame ? "active" : ""}">Ghost</button>
+          </div>
           <label>Tick
             <input type="range" min="0" max="${Math.max(0, this.session.timeline.frames.at(-1)?.tick ?? 0)}" value="${this.session.timeline.tick}" data-studio-field="timeline" />
           </label>
@@ -587,11 +968,19 @@ export class StudioSurfaceController {
             <dt>Analysis ms</dt><dd>${profiler?.analysisMs.toFixed(3) ?? "0.000"}</dd>
             <dt>AI ms</dt><dd>${this.session.analysis.timings.aiMs.toFixed(3)}</dd>
             <dt>Nav samples</dt><dd>${profiler?.navigationSamples ?? 0}</dd>
+            <dt>Objects</dt><dd>${this.session.world.pieces.length + this.session.world.towers.length + this.session.world.actors.length}</dd>
             <dt>Spark</dt><dd>${spark || "-"}</dd>
           </dl>
         </div>
         <div class="studio-panel-block">
           <h2>Quick tools</h2>
+          <div class="studio-transport-row">
+            <button data-studio-action="isolate-selection" class="${this.isolateSelection ? "active" : ""}">Isolate</button>
+            <button data-studio-action="jump-issue">Issue</button>
+            <button data-studio-action="toggle-gate">Gate</button>
+            <button data-studio-action="clean-mode" class="${this.cleanMode ? "active" : ""}">Clean</button>
+            <button data-studio-action="presentation-mode" class="${this.presentationMode ? "active" : ""}">Present</button>
+          </div>
           <div class="overlay-strip studio-options-strip">
             <span>Options</span>
             ${OVERLAY_KEYS.map((key) => `<button data-overlay="${key}" class="${this.state.debugOverlays[key] ? "active" : ""}">${this.overlayLabel(key)}</button>`).join("")}
@@ -612,6 +1001,21 @@ export class StudioSurfaceController {
     if (!button) return;
     if (button.dataset.route) {
       this.context.navigate(button.dataset.route as AppRoute);
+      return;
+    }
+    if (button.dataset.workMode) {
+      this.workMode = button.dataset.workMode as StudioWorkMode;
+      if (this.workMode === "combat") this.applyStudioView("3d");
+      if (this.workMode === "performance") {
+        this.context.stores.settingsStore.setState((current) => ({ ...current, preset: "performance" }));
+      }
+      this.writeUiPrefs({ workMode: this.workMode });
+      this.updateChromeShell();
+      this.updateHud(true);
+      return;
+    }
+    if (button.dataset.command) {
+      this.executeCommand(button.dataset.command);
       return;
     }
     if (button.dataset.tool) {
@@ -654,6 +1058,40 @@ export class StudioSurfaceController {
       this.applyRecipe(button.dataset.studioRecipe as StudioRecipeId);
       return;
     }
+    if (button.dataset.panelToggle === "left") {
+      this.leftPanelCollapsed = !this.leftPanelCollapsed;
+      this.writeUiPrefs({ leftPanelCollapsed: this.leftPanelCollapsed });
+      this.updateChromeShell();
+      this.updateHud(true);
+      return;
+    }
+    if (button.dataset.panelToggle === "side") {
+      this.sidePanelCollapsed = !this.sidePanelCollapsed;
+      this.writeUiPrefs({ sidePanelCollapsed: this.sidePanelCollapsed });
+      this.updateChromeShell();
+      this.updateHud(true);
+      return;
+    }
+    if (button.dataset.surfaceBrush) {
+      this.surfaceBrush = button.dataset.surfaceBrush as SurfaceMaterialKind;
+      this.updateHud(true);
+      return;
+    }
+    if (button.dataset.surfaceIntensity) {
+      this.surfaceIntensity = Number(button.dataset.surfaceIntensity) as SurfaceIntensity;
+      this.updateHud(true);
+      return;
+    }
+    if (button.dataset.actorVisual) {
+      this.actorVisualBrush = button.dataset.actorVisual as ActorVisualVariant;
+      const selectedActorId = this.session.selection?.kind === "actor" ? this.session.selection.id : undefined;
+      if (selectedActorId) {
+        const world = withActorVisual(this.session.world, selectedActorId, this.actorVisualBrush);
+        this.setState((current) => ({ ...current, session: replaceStudioWorld(current.session, world) }));
+      }
+      this.updateHud(true);
+      return;
+    }
     switch (button.dataset.studioAction) {
       case "play":
         this.setState((current) => {
@@ -669,6 +1107,20 @@ export class StudioSurfaceController {
         });
         this.updateHud(true);
         this.resizeRenderersSoon();
+        return;
+      case "command-palette":
+        this.commandPaletteOpen = true;
+        this.destroyRenderersForRemount();
+        this.renderFrame();
+        this.mountRenderers();
+        this.updateHud(true);
+        return;
+      case "close-command":
+        this.commandPaletteOpen = false;
+        this.destroyRenderersForRemount();
+        this.renderFrame();
+        this.mountRenderers();
+        this.updateHud(true);
         return;
       case "step":
         this.setState((current) => ({ ...current, session: stepStudioSession(current.session, this.inputState(), []) }));
@@ -696,6 +1148,21 @@ export class StudioSurfaceController {
       case "toggle-gate":
         this.toggleSelectedGate();
         return;
+      case "fullscreen":
+        void this.host.querySelector<HTMLElement>(".studio-shell")?.requestFullscreen?.();
+        return;
+      case "performance-mode":
+        this.context.stores.settingsStore.setState((current) => ({ ...current, preset: current.preset === "performance" ? "balanced" : "performance" }));
+        this.updateHud(true);
+        return;
+      case "clean-mode":
+        this.cleanMode = !this.cleanMode;
+        this.updateChromeShell();
+        return;
+      case "presentation-mode":
+        this.presentationMode = !this.presentationMode;
+        this.updateChromeShell();
+        return;
       case "jump-issue":
         this.jumpToIssue();
         return;
@@ -717,6 +1184,34 @@ export class StudioSurfaceController {
     }
   }
 
+  private executeCommand(command: string): void {
+    this.commandPaletteOpen = false;
+    if (command === "create-enemy") {
+      this.setState((current) => ({ ...current, tool: "enemy", pendingPoint: undefined }));
+    } else if (command === "duplicate-gate") {
+      const gate = this.session.world.pieces.find((piece) => piece.kind === "gate");
+      if (gate) this.applySelection({ kind: "piece", id: gate.id });
+    } else if (command === "open-runtime") {
+      this.context.navigate("/runtime");
+      return;
+    } else if (command === "toggle-heatmap") {
+      this.setState((current) => ({ ...current, debugOverlays: { ...current.debugOverlays, influence: !current.debugOverlays.influence } }));
+    } else if (command === "snapshot") {
+      this.setState((current) => ({ ...current, session: replaceStudioWorld(current.session, current.session.world, []) }));
+    } else if (command === "export-scene") {
+      this.bakeRuntime();
+      return;
+    } else if (command === "clean-mode") {
+      this.cleanMode = !this.cleanMode;
+    } else if (command === "presentation-mode") {
+      this.presentationMode = !this.presentationMode;
+    }
+    this.destroyRenderersForRemount();
+    this.renderFrame();
+    this.mountRenderers();
+    this.updateHud(true);
+  }
+
   private handleChange(event: Event): void {
     const target = event.target as HTMLElement;
     if (target instanceof HTMLSelectElement && target.dataset.studioField === "scenario") {
@@ -732,14 +1227,45 @@ export class StudioSurfaceController {
     if (target instanceof HTMLSelectElement && target.dataset.studioField === "layer-filter") {
       this.layerFilter = target.value === "all" ? "all" : (Number(target.value) as HeightLayer);
       this.updateHud(true);
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.dataset.studioField === "chrome-mode") {
+      this.chromeMode = target.value as StudioChromeMode;
+      if (this.chromeMode === "immersive") {
+        this.leftPanelCollapsed = true;
+        this.sidePanelCollapsed = true;
+      }
+      this.writeUiPrefs({ chromeMode: this.chromeMode, leftPanelCollapsed: this.leftPanelCollapsed, sidePanelCollapsed: this.sidePanelCollapsed });
+      this.updateChromeShell();
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.dataset.studioField === "theme-mode") {
+      this.themeMode = target.value as StudioThemeMode;
+      this.writeUiPrefs({ themeMode: this.themeMode });
+      this.updateChromeShell();
     }
   }
 
   private handleInput(event: Event): void {
     const target = event.target as HTMLElement;
+    if (target instanceof HTMLInputElement && target.dataset.studioField === "palette-search") {
+      this.paletteSearch = target.value;
+      const left = this.host.querySelector<HTMLElement>("#studio-left .studio-panel-content");
+      if (left) left.innerHTML = this.leftPanelHtml();
+      return;
+    }
     if (target instanceof HTMLInputElement && target.dataset.studioField === "timeline") {
       this.setState((current) => ({ ...current, session: scrubStudioTimeline(current.session, Number(target.value)) }));
       this.updateHud(true);
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.dataset.panelSize) {
+      const value = Number(target.value);
+      if (target.dataset.panelSize === "left") this.leftPanelWidth = value;
+      if (target.dataset.panelSize === "side") this.sidePanelWidth = value;
+      if (target.dataset.panelSize === "bottom") this.bottomPanelHeight = value;
+      this.writeUiPrefs({ leftPanelWidth: this.leftPanelWidth, sidePanelWidth: this.sidePanelWidth, bottomPanelHeight: this.bottomPanelHeight });
+      this.updatePanelVars();
       return;
     }
     if (target instanceof HTMLInputElement && target.dataset.studioField === "compare") {
@@ -864,11 +1390,27 @@ export class StudioSurfaceController {
   }
 
   private handleWorldClick(point: Vec2): void {
+    if (this.state.tool === "surface") {
+      const layer = this.activePlacementLayer();
+      const cell = pointToSurfaceCell(point);
+      const paintKey = `${layer}:${cell.i}:${cell.j}:${this.surfaceBrush}:${this.surfaceIntensity}`;
+      if (paintKey === this.lastSurfacePaintKey) return;
+      this.lastSurfacePaintKey = paintKey;
+      const world = paintSurfaceTile(this.session.world, point, this.surfaceBrush, this.surfaceIntensity, layer);
+      this.setState((current) => ({
+        ...current,
+        session: replaceStudioWorld(current.session, world),
+        pendingPoint: undefined,
+        hoverPoint: undefined
+      }));
+      this.updateHud(true);
+      return;
+    }
     if (this.isActorTool(this.state.tool)) {
       const kind = this.state.tool;
       const layer = this.activePlacementLayer();
       const actorId = kind === "player" ? "player" : this.nextActorId(kind);
-      const actor = createActor(actorId, kind, point, { heightLayer: layer });
+      const actor = createActor(actorId, kind, point, { heightLayer: layer, visual: this.actorVisualBrush });
       const actors =
         kind === "player"
           ? [actor, ...this.session.world.actors.filter((entry) => entry.kind !== "player")]
@@ -1021,7 +1563,8 @@ export class StudioSurfaceController {
   }
 
   private bakeRuntime(): void {
-    const artifact = createRuntimeBakeArtifact(this.session.world, "studio", `Studio ${this.session.scenarioId}`, this.session.timeline.tick, this.session.scenarioId);
+    const world = materializeCreatedMobs(this.session.world, loadCreatedMobCache().records);
+    const artifact = createRuntimeBakeArtifact(world, "studio", `Studio ${this.session.scenarioId} + created mobs`, this.session.timeline.tick, this.session.scenarioId);
     const session = materializeRuntimeSession(artifact);
     this.context.stores.runtimeStore.setState((current) => ({ ...current, artifact, session, replaySession: undefined }));
     this.context.navigate("/runtime");
@@ -1080,6 +1623,7 @@ export class StudioSurfaceController {
     const pieces = world.pieces.filter((piece) => this.matchesLayer(piece.heightLayer) && this.matchesSelection(piece.id));
     const towers = world.towers.filter((tower) => this.matchesLayer(tower.heightLayer) && this.matchesSelection(tower.id, tower.fenceId));
     const connectors = world.connectors.filter((connector) => this.matchesConnector(connector));
+    const surfaceTiles = (world.surfaceTiles ?? []).filter((tile) => this.matchesLayer(tile.heightLayer));
     const actors = world.actors.filter((actor) => this.matchesLayer(actor.heightLayer) && this.matchesSelection(actor.id));
     const baseCore = this.matchesLayer(world.baseCore.heightLayer) && (!selectedId || this.session.selection?.kind === "base-core") ? world.baseCore : { ...world.baseCore };
     return {
@@ -1087,6 +1631,7 @@ export class StudioSurfaceController {
       pieces,
       towers,
       connectors,
+      surfaceTiles,
       actors,
       baseCore
     };
@@ -1103,6 +1648,7 @@ export class StudioSurfaceController {
       pieces: ghost.pieces.filter((piece) => this.matchesLayer(piece.heightLayer) && this.matchesSelection(piece.id)),
       towers: ghost.towers.filter((tower) => this.matchesLayer(tower.heightLayer) && this.matchesSelection(tower.id, tower.fenceId)),
       connectors: ghost.connectors.filter((connector) => this.matchesConnector(connector)),
+      surfaceTiles: (ghost.surfaceTiles ?? []).filter((tile) => this.matchesLayer(tile.heightLayer)),
       actors: ghost.actors.filter((actor) => this.matchesLayer(actor.heightLayer) && this.matchesSelection(actor.id)),
       baseCore: this.matchesLayer(ghost.baseCore.heightLayer) && (!this.isolateSelection || tempSession.selection?.kind === "base-core") ? ghost.baseCore : original.baseCore
     };
@@ -1130,6 +1676,7 @@ export class StudioSurfaceController {
   }
 
   private toolLabel(tool: ToolMode): string {
+    if (tool === "surface") return "Chao";
     if (tool === "fence") return "Cerca";
     if (tool === "fence-tl") return "Cerca TL";
     if (tool === "gate") return "Portao";
@@ -1154,6 +1701,7 @@ export class StudioSurfaceController {
   }
 
   private toolPreview(tool: ToolMode): string {
+    if (tool === "surface") return `<svg viewBox="0 0 80 46"><path d="M14 13h20v20H14zM34 13h20v20H34zM54 13h12v20H54z" /><path d="M18 28l12-10M39 28l10-10M57 28l6-10" /></svg>`;
     if (tool === "fence") return `<svg viewBox="0 0 80 46"><path d="M10 16h60M10 30h60" /><path d="M16 9v29M40 9v29M64 9v29" /></svg>`;
     if (tool === "fence-tl") return `<svg viewBox="0 0 80 46"><path d="M10 16h60M10 30h60" /><path d="M15 7v31M33 7v31M51 7v31M69 7v31" /><circle cx="40" cy="7" r="5" /></svg>`;
     if (tool === "gate") return `<svg viewBox="0 0 80 46"><path d="M12 34h56M16 11v27M64 11v27" /><path d="M24 17l32 14M56 17L24 31" /></svg>`;
@@ -1168,6 +1716,7 @@ export class StudioSurfaceController {
   }
 
   private toolDescription(tool: ToolMode): string {
+    if (tool === "surface") return "textura leve";
     if (tool === "fence") return "1,5m / bloqueio";
     if (tool === "fence-tl") return "4m / topo";
     if (tool === "gate") return "portal E / fluxo";
@@ -1179,6 +1728,10 @@ export class StudioSurfaceController {
     if (tool === "dwarf") return "0,5m";
     if (tool === "boss") return "4m";
     return "remove perto";
+  }
+
+  private cssHex(color: number): string {
+    return `#${color.toString(16).padStart(6, "0")}`;
   }
 
   private isSegmentTool(tool: ToolMode): tool is PlacementTool {
@@ -1223,6 +1776,20 @@ export class StudioSurfaceController {
   private cameraModeLabel(mode: CameraMode3D): string {
     if (mode === "first-person") return "FPS";
     return mode === "tactical" ? "Tactical" : "Inspect";
+  }
+
+  private workModeLabel(mode: StudioWorkMode): string {
+    if (mode === "builder") return "Builder";
+    if (mode === "combat") return "Combat";
+    if (mode === "logic") return "Logic";
+    return "Perf";
+  }
+
+  private themeLabel(mode: StudioThemeMode): string {
+    if (mode === "dark-core") return "Dark Core";
+    if (mode === "neon-tech") return "Neon Tech";
+    if (mode === "graphite-pro") return "Graphite Pro";
+    return "Midnight Blue";
   }
 
   private viewLabel(view: ViewMode): string {

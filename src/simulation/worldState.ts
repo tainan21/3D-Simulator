@@ -1,6 +1,6 @@
 import { BaseEditor } from "../editor/baseEditor";
 import type { PhaseScenarioId } from "../app/contracts";
-import { createActor, createBaseCore, type BasePiece, type HeightConnector, type TowerPiece } from "../domain/canonical";
+import { createActor, createBaseCore, type BasePiece, type HeightConnector, type SurfaceTile, type TowerPiece } from "../domain/canonical";
 import type { AiMemoryState } from "./aiTypes";
 import { createProceduralWorld } from "./procedural";
 import { createRogueRun, spawnWaveActors, type RogueRunState } from "./roguelite";
@@ -10,6 +10,7 @@ export type WorldState = {
   pieces: BasePiece[];
   towers: TowerPiece[];
   connectors: HeightConnector[];
+  surfaceTiles?: SurfaceTile[];
   actors: ReturnType<typeof createActor>[];
   baseCore: ReturnType<typeof createBaseCore>;
   run: RogueRunState;
@@ -27,10 +28,11 @@ export function cloneWorld<T>(world: T): T {
   return JSON.parse(JSON.stringify(world)) as T;
 }
 
-function createWorldState(base: Omit<WorldState, "structures" | "combatLog" | "tick"> & Partial<Pick<WorldState, "structures" | "combatLog" | "tick">>): WorldState {
+function createWorldState(base: Omit<WorldState, "structures" | "combatLog" | "tick" | "surfaceTiles"> & Partial<Pick<WorldState, "structures" | "combatLog" | "tick" | "surfaceTiles">>): WorldState {
   const initialStructures = base.structures ?? createStructureMap(base.pieces, base.towers, base.baseCore, base.run.baseCoreMaxHp);
   return {
     ...base,
+    surfaceTiles: base.surfaceTiles ?? [],
     tick: base.tick ?? 0,
     combatLog: base.combatLog ?? [],
     structures: initialStructures

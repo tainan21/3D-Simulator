@@ -1,8 +1,9 @@
 import { BaseEditor } from "../editor/baseEditor";
-import { createActor, createBaseCore, type BasePiece } from "../domain/canonical";
+import { createActor, createBaseCore, type BasePiece, type SurfaceTile } from "../domain/canonical";
 import { createRogueRun } from "../simulation/roguelite";
 import { createStructureMap } from "../simulation/structures";
 import type { WorldState } from "../simulation/worldState";
+import { createSurfacePatch } from "./surfaceStudio";
 
 export type StudioRecipeId = "inner-room" | "outer-arena" | "gate-corridor" | "height-spine" | "boss-breach";
 
@@ -20,7 +21,7 @@ export const STUDIO_RECIPES: StudioRecipe[] = [
   { id: "boss-breach", label: "Boss breach", intent: "Pressao estrutural com TL, torre e boss." }
 ];
 
-function rebuildWorld(base: WorldState, editor: BaseEditor, actors: WorldState["actors"], selectedId?: string): WorldState {
+function rebuildWorld(base: WorldState, editor: BaseEditor, actors: WorldState["actors"], selectedId?: string, surfaceTiles: SurfaceTile[] = []): WorldState {
   const baseCore = createBaseCore(base.baseCore.position, { heightLayer: base.baseCore.heightLayer });
   const run = createRogueRun();
   return {
@@ -28,6 +29,7 @@ function rebuildWorld(base: WorldState, editor: BaseEditor, actors: WorldState["
     pieces: editor.pieces,
     towers: editor.towers,
     connectors: editor.connectors,
+    surfaceTiles,
     actors,
     baseCore,
     run,
@@ -58,7 +60,8 @@ export function applyStudioRecipe(world: WorldState, recipeId: StudioRecipeId): 
       { ...world, baseCore: createBaseCore({ x: 0, z: 0 }) },
       editor,
       [createActor("player", "player", { x: 0, z: -1.2 }), createActor("enemy-1", "enemy", { x: 5, z: 2 })],
-      tl.id
+      tl.id,
+      createSurfacePatch({ i: -2, j: -2 }, { i: 2, j: 2 }, "stone", 2, 0)
     );
   }
 
@@ -73,7 +76,11 @@ export function applyStudioRecipe(world: WorldState, recipeId: StudioRecipeId): 
       { ...world, baseCore: createBaseCore({ x: -1, z: 0 }) },
       editor,
       [createActor("player", "player", { x: -4, z: 0 }), createActor("enemy-1", "enemy", { x: 4.5, z: 2 }), createActor("dwarf-1", "dwarf", { x: 5, z: -2 })],
-      tl?.id
+      tl?.id,
+      [
+        ...createSurfacePatch({ i: -5, j: -3 }, { i: 2, j: 3 }, "dirt", 2, 0),
+        ...createSurfacePatch({ i: 3, j: -2 }, { i: 6, j: 2 }, "moss", 1, 0)
+      ]
     );
   }
 
@@ -87,7 +94,11 @@ export function applyStudioRecipe(world: WorldState, recipeId: StudioRecipeId): 
       { ...world, baseCore: createBaseCore({ x: -3, z: 0 }) },
       editor,
       [createActor("player", "player", { x: -4, z: 0 }), createActor("enemy-1", "enemy", { x: 6.2, z: -0.4 }), createActor("boss-1", "boss", { x: 8, z: 1 })],
-      tl.id
+      tl.id,
+      [
+        ...createSurfacePatch({ i: -5, j: -1 }, { i: 5, j: 1 }, "stone", 2, 0),
+        ...createSurfacePatch({ i: 1, j: -1 }, { i: 3, j: 1 }, "rune", 3, 0)
+      ]
     );
   }
 
@@ -103,7 +114,11 @@ export function applyStudioRecipe(world: WorldState, recipeId: StudioRecipeId): 
       { ...world, baseCore: createBaseCore({ x: 0, z: 0 }, { heightLayer: 1 }) },
       editor,
       [createActor("player", "player", { x: -5, z: 0 }), createActor("enemy-1", "enemy", { x: 6, z: 1 }, { heightLayer: 1 })],
-      tl.id
+      tl.id,
+      [
+        ...createSurfacePatch({ i: -5, j: -1 }, { i: -3, j: 1 }, "dirt", 1, 0),
+        ...createSurfacePatch({ i: -2, j: -1 }, { i: 4, j: 2 }, "rune", 2, 1)
+      ]
     );
   }
 
@@ -118,6 +133,10 @@ export function applyStudioRecipe(world: WorldState, recipeId: StudioRecipeId): 
     { ...world, baseCore: createBaseCore({ x: 0, z: 0 }) },
     editor,
     [createActor("player", "player", { x: -2, z: 0 }), createActor("enemy-1", "enemy", { x: 7, z: -2 }), createActor("boss-1", "boss", { x: 8, z: 3 })],
-    tl.id
+    tl.id,
+    [
+      ...createSurfacePatch({ i: -3, j: -3 }, { i: 2, j: 3 }, "stone", 2, 0),
+      ...createSurfacePatch({ i: 4, j: -1 }, { i: 7, j: 4 }, "water", 1, 0)
+    ]
   );
 }

@@ -29,7 +29,7 @@ export type WorldFrameDelta = Readonly<
   Partial<
     Pick<
       WorldState,
-      "pieces" | "towers" | "connectors" | "actors" | "baseCore" | "run" | "aiMemory" | "worldSeed" | "tick" | "structures" | "combatLog" | "runtime" | "selectedId" | "phaseScenarioId"
+      "pieces" | "towers" | "connectors" | "surfaceTiles" | "actors" | "baseCore" | "run" | "aiMemory" | "worldSeed" | "tick" | "structures" | "combatLog" | "runtime" | "selectedId" | "phaseScenarioId"
     >
   >
 >;
@@ -88,6 +88,7 @@ const WORLD_DELTA_FIELDS: Array<keyof WorldFrameDelta> = [
   "pieces",
   "towers",
   "connectors",
+  "surfaceTiles",
   "actors",
   "baseCore",
   "run",

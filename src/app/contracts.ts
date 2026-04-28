@@ -6,6 +6,7 @@ import type { Store } from "./store";
 import type { PerformanceRegistry, PerformanceSnapshot, PerformancePresetConfig } from "./performance";
 import type { BaseEditor, PlacementTool } from "../editor/baseEditor";
 import type { StudioSession } from "../studio/session";
+import type { CharacterArchetype } from "../domain/entityArchetype";
 import type { WorldAnalysisSnapshot } from "../simulation/analysis";
 import type { WorldState } from "../simulation/worldState";
 import type { UniverseState, UniverseTickSummary } from "../domain/universe";
@@ -13,6 +14,8 @@ import type { UniverseState, UniverseTickSummary } from "../domain/universe";
 export type SurfaceId =
   | "hub"
   | "studio"
+  | "characters"
+  | "character-forge"
   | "runtime"
   | "phases"
   | "harness"
@@ -21,13 +24,24 @@ export type SurfaceId =
   | "debug"
   | "performance";
 
-export type AppRoute = "/hub" | "/studio" | "/runtime" | "/phases" | "/harness" | "/replay" | "/settings" | "/debug" | "/performance";
+export type AppRoute =
+  | "/hub"
+  | "/studio"
+  | "/characters"
+  | "/character-forge"
+  | "/runtime"
+  | "/phases"
+  | "/harness"
+  | "/replay"
+  | "/settings"
+  | "/debug"
+  | "/performance";
 
 export type SurfaceRole = "hub" | "editing" | "game" | "experiment" | "validation" | "diagnostic";
 
 export type PerformancePreset = "quality" | "balanced" | "performance" | "debug-heavy";
 export type ViewMode = "2d" | "25d" | "3d";
-export type ToolMode = PlacementTool | "tower" | "erase" | "ramp" | "platform-link" | "player" | "enemy" | "dwarf" | "boss";
+export type ToolMode = PlacementTool | "surface" | "tower" | "erase" | "ramp" | "platform-link" | "player" | "enemy" | "dwarf" | "boss";
 export type PhaseScenarioId = "baseline" | "height-lab" | "siege-lab" | "chunks-101";
 
 export type SettingsState = Readonly<{
@@ -42,6 +56,14 @@ export type StudioWorkspaceState = Readonly<{
   pendingPoint?: { x: number; z: number };
   hoverPoint?: { x: number; z: number };
   debugOverlays: DebugOverlayOptions;
+  camera3D: ThreeCameraState;
+}>;
+
+export type CharacterStudioState = Readonly<{
+  archetype: CharacterArchetype;
+  library: CharacterArchetype[];
+  selectedId?: string;
+  view: ViewMode;
   camera3D: ThreeCameraState;
 }>;
 
@@ -94,6 +116,7 @@ export type ReplayStoreState = Readonly<{
 export type AppStores = Readonly<{
   settingsStore: Store<SettingsState>;
   studioStore: Store<StudioWorkspaceState>;
+  characterStudioStore: Store<CharacterStudioState>;
   harnessStore: Store<HarnessState>;
   phasesStore: Store<PhasesWorkspaceState>;
   runtimeStore: Store<RuntimeWorkspaceState>;

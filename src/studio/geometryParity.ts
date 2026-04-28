@@ -25,7 +25,7 @@ function stableSignature(snapshot: GeometryAdapterSnapshot): string {
 }
 
 function objectCount(snapshot: GeometryAdapterSnapshot): number {
-  return snapshot.pieces.length + snapshot.towers.length + snapshot.connectors.length + snapshot.actors.length + 1;
+  return snapshot.pieces.length + snapshot.towers.length + snapshot.connectors.length + snapshot.surfaceTiles.length + snapshot.actors.length + 1;
 }
 
 export function createGeometryParityReport(world: WorldState): GeometryParityReport {

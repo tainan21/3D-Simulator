@@ -67,13 +67,14 @@ export function stepSimulation(world: WorldState, input: InputState, dt: number,
   const interactionWorld = applyPlayerGateInteraction(world, input);
   const collisionPieces = activePieces(interactionWorld.pieces, interactionWorld.structures);
   const aiDebug = computeAiDebug(interactionWorld, { policy: aiPolicy });
+  const aiByActor = new Map(aiDebug.map((entry) => [entry.actorId, entry]));
   const nextActors = world.actors.map((actor) => {
     if (actor.kind === "player") {
       const moved = moveActor(actor, scale(normalize(input.move), actor.speed * playerSpeedMultiplier(world.run) * dt), collisionPieces);
       return applyPlayerConnectorTraversal(moved, interactionWorld);
     }
 
-    const debugEntry = aiDebug.find((entry) => entry.actorId === actor.id);
+    const debugEntry = aiByActor.get(actor.id);
     if (!debugEntry) return actor;
     const chaseSpeed =
       actor.kind === "boss"
@@ -265,25 +266,27 @@ function applyStructuralCombat(world: WorldState, aiDebug: ReturnType<typeof com
   let actors = world.actors;
   let structures = world.structures;
   let combatLog = world.combatLog;
+  let actorById = new Map(actors.map((candidate) => [candidate.id, candidate]));
 
   for (const entry of aiDebug) {
-    const actor = actors.find((candidate) => candidate.id === entry.actorId);
+    const actor = actorById.get(entry.actorId);
     if (!actor) continue;
     const contactDistance = distance(actor.position, entry.contactPoint);
 
     if (entry.objective === "player") {
-      const player = actors.find((candidate) => candidate.id === entry.targetId);
+      const player = actorById.get(entry.targetId);
       if (!player || contactDistance > actor.radius + player.radius + 0.28) continue;
-      const amount = (actor.kind === "boss" ? 2.4 : 0.8) * dt;
+      const amount = (actor.combatProfile?.damage ?? (actor.kind === "boss" ? 2.4 : 0.8)) * dt;
       actors = actors.map((candidate) => (candidate.id === player.id ? { ...candidate, hp: candidate.hp - amount } : candidate));
+      actorById = new Map(actors.map((candidate) => [candidate.id, candidate]));
       combatLog = appendCombatEvent(world, actor.id, player.id, entry.contactPoint, amount);
       continue;
     }
 
-    const threshold = actor.kind === "boss" ? actor.radius + 0.45 : actor.radius + 0.24;
+    const threshold = actor.combatProfile?.range ?? (actor.kind === "boss" ? actor.radius + 0.45 : actor.radius + 0.24);
     if (contactDistance > threshold) continue;
 
-    const amount = (actor.kind === "boss" ? 4.8 : 1.9) * dt;
+    const amount = (actor.combatProfile?.damage ?? (actor.kind === "boss" ? 4.8 : 1.9)) * dt;
     structures = applyStructureDamage(structures, entry.targetId, amount, entry.contactPoint, actor.id);
     if (entry.objective === "weak-structure" || entry.objective === "closed-gate" || entry.objective === "open-gate") {
       structures = splashTowerDamage(structures, world.towers, entry.targetId, amount, entry.contactPoint, actor.id);

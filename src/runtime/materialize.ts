@@ -36,6 +36,7 @@ export function createRuntimeBakeArtifact(
 ): RuntimeBakeArtifact {
   const prepared: WorldState = {
     ...cloneWorld(world),
+    surfaceTiles: world.surfaceTiles ?? [],
     tick: 0,
     combatLog: [],
     structures: ensureBakedStructures(world),
@@ -62,6 +63,7 @@ export function materializeRuntimeSession(artifact: RuntimeBakeArtifact): Runtim
   const world = JSON.parse(artifact.worldJson) as WorldState;
   const prepared: WorldState = {
     ...world,
+    surfaceTiles: world.surfaceTiles ?? [],
     structures: ensureBakedStructures(world),
     combatLog: world.combatLog ?? [],
     tick: world.tick ?? 0,

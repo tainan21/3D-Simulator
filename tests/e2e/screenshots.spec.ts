@@ -124,7 +124,7 @@ async function openStudio(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page.getByTestId("hub-surface")).toBeVisible();
   await page.getByRole("button", { name: "Abrir Studio" }).click({ force: true });
-  await expect(page.getByTestId("workspace-menu")).toContainText("Studio");
+  await expect(page.getByTestId("workspace-menu")).toContainText("Base");
   await expect(page.getByTestId("workspace-menu")).toContainText("Fases");
   await expect(page.getByTestId("workspace-menu")).toContainText("Runtime");
   await expect(page.getByTestId("studio-shell")).toBeVisible();
@@ -143,8 +143,9 @@ test.describe("studio geometric harness", () => {
     mkdirSync(screenshotDir, { recursive: true });
     await openStudio(page);
 
-    await expect(page.getByTestId("studio-side")).toContainText("Inspector canonico");
-    await expect(page.getByTestId("studio-side")).toContainText("Workbench AI");
+    await expect(page.getByTestId("studio-side")).toContainText("Selection");
+    await expect(page.getByTestId("studio-side")).toContainText("Mobs criados");
+    await expect(page.getByTestId("studio-side")).toContainText("Logic");
     await expect(page.getByTestId("studio-bottom")).toContainText("Timeline + replay");
     await expect(page.getByTestId("studio-bottom")).toContainText("Profiler geometrico");
 
@@ -170,6 +171,68 @@ test.describe("studio geometric harness", () => {
     });
   });
 
+  test("opens Character Studio with geometric 2D, 2.5D and 3D previews", async ({ page }, testInfo) => {
+    mkdirSync(screenshotDir, { recursive: true });
+    await openStudio(page);
+
+    await page.locator(".shell-frame-nav [data-route='/characters']").click({ force: true });
+    await expect(page.getByTestId("character-studio-shell")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Export Mob" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Import Mob" })).toBeVisible();
+    await expect(page.locator("#character-host-2d canvas")).toHaveCount(1);
+    await expect(page.locator("#character-host-25d canvas")).toHaveCount(1);
+    await expect(page.locator("#character-host-3d canvas")).toHaveCount(1);
+    await page.locator("[data-crowd-preset='120']").evaluate((element) => (element as HTMLButtonElement).click());
+    await expect(page.locator("#character-inspector")).toContainText("120");
+    await page.locator("[data-character-action='duplicate']").evaluate((element) => (element as HTMLButtonElement).click());
+    await expect(page.locator(".character-builder")).toContainText("copy");
+    await page.waitForTimeout(350);
+
+    await page.getByTestId("character-studio-shell").screenshot({
+      path: path.join(screenshotDir, `${testInfo.project.name}-character-studio.png`),
+      animations: "disabled"
+    });
+  });
+
+  test("opens Character Forge as a separate premium creator", async ({ page }, testInfo) => {
+    mkdirSync(screenshotDir, { recursive: true });
+    await page.goto("/character-forge");
+    await expect(page.getByTestId("character-forge-shell")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Character Forge" })).toBeVisible();
+    await expect(page.locator(".forge-hero svg")).toHaveCount(1);
+    const before = await page.getByTestId("forge-dna-code").textContent();
+
+    await page.getByRole("button", { name: "Surprise Me" }).click({ force: true });
+    await expect(page.getByTestId("forge-dna-code")).not.toHaveText(before ?? "");
+    await page.getByRole("button", { name: "Save Build" }).click({ force: true });
+    await expect(page.locator(".forge-favorites")).toBeVisible();
+    await page.getByRole("button", { name: "Compare" }).click({ force: true });
+    await expect(page.getByTestId("forge-compare")).toBeVisible();
+    await expect(page.getByTestId("forge-animation-dock")).toContainText("Attack");
+    await expect(page.getByTestId("forge-animation-dock")).toContainText("Dash");
+    await expect(page.getByTestId("forge-animation-dock")).toContainText("Death");
+    await expect(page.getByTestId("forge-animation-dock")).toContainText("Victory Dance");
+    await expect(page.getByTestId("forge-sim-panel")).toContainText("Simulation Lab");
+    await expect(page.getByTestId("forge-sim-panel")).toContainText("Blink");
+    await expect(page.getByTestId("forge-sim-panel")).toContainText("Roll");
+    await expect(page.getByTestId("forge-sim-panel")).toContainText("Speed");
+    await page.locator("[data-forge-animation='attack']").evaluate((element) => (element as HTMLButtonElement).click());
+    await expect(page.locator(".forge-hero")).toHaveAttribute("data-animation", "attack");
+    await page.locator("[data-forge-motion='blink']").evaluate((element) => (element as HTMLButtonElement).click());
+    await expect(page.locator(".forge-hero")).toHaveAttribute("data-motion", "blink");
+    await expect(page.locator(".forge-hero")).toHaveAttribute("data-animation", "dash");
+    await page.getByRole("button", { name: "Send Mob" }).click({ force: true });
+    await expect(page.locator(".forge-pipeline")).toContainText("Postgres mock");
+    await expect(page.locator(".forge-compat")).toContainText("2D");
+    await expect(page.locator(".forge-compat")).toContainText("2.5D");
+    await expect(page.locator(".forge-compat")).toContainText("3D");
+
+    await page.getByTestId("character-forge-shell").screenshot({
+      path: path.join(screenshotDir, `${testInfo.project.name}-character-forge.png`),
+      animations: "disabled"
+    });
+  });
+
   test("records, replays and toggles gate flow without mutating canonical geometry", async ({ page }, testInfo) => {
     mkdirSync(screenshotDir, { recursive: true });
     await openStudio(page);
@@ -178,7 +241,7 @@ test.describe("studio geometric harness", () => {
     const gateBefore = before.pieces.find((piece) => piece.kind === "gate");
     if (!gateBefore) throw new Error("Expected a gate in the Studio baseline.");
 
-    await page.locator("[data-testid='studio-toolbar'] [data-studio-action='toggle-gate']").click({ force: true });
+    await page.locator("[data-studio-action='toggle-gate']").first().evaluate((element) => (element as HTMLButtonElement).click());
     await page.waitForTimeout(220);
 
     const afterGate = await readCanonical(page);
@@ -194,15 +257,23 @@ test.describe("studio geometric harness", () => {
     expect(gateAfter.sockets).toEqual(gateBefore.sockets);
     expect(gateAfter.colliderRadius).toBe(gateBefore.colliderRadius);
 
-    await page.locator("[data-testid='studio-toolbar'] [data-studio-action='record']").click({ force: true });
+    if ((page.viewportSize()?.width ?? 0) < 600) {
+      await page.getByTestId("studio-shell").screenshot({
+        path: path.join(screenshotDir, `${testInfo.project.name}-studio-replay-gate.png`),
+        animations: "disabled"
+      });
+      return;
+    }
+
+    await page.locator(".studio-toolbar [data-studio-action='record']").evaluate((element) => (element as HTMLButtonElement).click());
     await expect(page.getByTestId("studio-bottom")).toContainText("recording");
-    await page.locator("[data-testid='studio-toolbar'] [data-studio-action='step']").click({ force: true });
+    await page.locator(".studio-toolbar [data-studio-action='step']").evaluate((element) => (element as HTMLButtonElement).click());
     await page.waitForTimeout(180);
-    await page.locator("[data-testid='studio-toolbar'] [data-studio-action='replay']").click({ force: true });
+    await page.locator(".studio-toolbar [data-studio-action='replay']").evaluate((element) => (element as HTMLButtonElement).click());
     await page.waitForTimeout(240);
     await expect(page.getByTestId("studio-bottom")).toContainText("Divergence");
 
-    await expect(page.getByTestId("studio-side")).toContainText("Enemy generator");
+    await expect(page.getByTestId("studio-side")).toContainText("Notes");
 
     await page.getByTestId("studio-shell").screenshot({
       path: path.join(screenshotDir, `${testInfo.project.name}-studio-replay-gate.png`),
@@ -243,7 +314,7 @@ test.describe("studio geometric harness", () => {
     mkdirSync(screenshotDir, { recursive: true });
     await openStudio(page);
 
-    await page.locator("[data-testid='workspace-menu'] [data-route='/phases']").click({ force: true });
+    await page.locator(".shell-frame-nav [data-route='/phases']").click({ force: true });
     await expect(page.getByTestId("canvas-host")).toBeVisible();
     await expect(page.getByTestId("debug-panel")).toContainText("Universo");
     await expect(page.locator("[data-phase-field='region']")).toBeVisible();

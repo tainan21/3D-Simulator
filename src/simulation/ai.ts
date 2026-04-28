@@ -33,6 +33,8 @@ type TargetShape =
 const NAV_SAMPLE_STEP = 1;
 const NAV_SAMPLE_RADIUS = 3;
 const LOS_STEP = 0.25;
+const DEFAULT_CROWD_THRESHOLD = 36;
+const DEFAULT_MAX_DETAILED_ACTORS = 24;
 
 function pieceById(world: WorldState, id: string): BasePiece | undefined {
   return world.pieces.find((piece) => piece.id === id);
@@ -40,6 +42,56 @@ function pieceById(world: WorldState, id: string): BasePiece | undefined {
 
 function targetShapePoint(actor: Actor, shape: TargetShape): Vec2 {
   return shape.kind === "circle" ? nearestPointOnCircle(actor.position, shape.circle) : nearestPointOnCapsule(actor.position, shape.capsule);
+}
+
+function crowdDecision(actorId: string, targetId: string, objective: AiObjectiveKind, routeCost: number): AiDecisionSnapshot {
+  const chosen: AiTargetScore = {
+    targetId,
+    objective,
+    routeCost,
+    structuralWeakness: 0,
+    influencePenalty: 0,
+    gateBias: 0,
+    heightPenalty: 0,
+    total: routeCost
+  };
+  return { actorId, chosen, candidates: [chosen] };
+}
+
+function crowdAiEntry(world: WorldState, actor: Actor, player: Actor | undefined, policy: AiPolicyConfig): AiDebugState {
+  const actorKind = actor.kind as "enemy" | "dwarf" | "boss";
+  const usePlayer = Boolean(player && distance(actor.position, player.position) <= policy.visionRange * 1.35);
+  const targetId = usePlayer && player ? player.id : world.baseCore.id;
+  const objective: AiObjectiveKind = usePlayer ? "player" : "base-core";
+  const targetCircle = usePlayer && player ? actorCircle(player) : baseCoreCircle(world.baseCore);
+  const targetPoint = nearestPointOnCircle(actor.position, targetCircle);
+  const routeCost = distance(actor.position, targetPoint);
+  const perception: AiPerceptionState = {
+    visible: usePlayer,
+    withinFov: usePlayer,
+    withinRange: usePlayer,
+    blockingPieceIds: [],
+    memoryLeft: usePlayer ? policy.memoryDuration : world.aiMemory[actor.id]?.memoryLeft ?? 0,
+    lastSeenPoint: usePlayer && player ? player.position : world.aiMemory[actor.id]?.lastSeenPoint,
+    threatPriority: usePlayer ? 1 : 0.35
+  };
+  return {
+    actorId: actor.id,
+    actorKind,
+    objective,
+    targetId,
+    targetPoint,
+    contactPoint: targetPoint,
+    visible: perception.visible,
+    waypoints: [{ point: targetPoint, layer: actor.heightLayer, baseY: actor.baseY }],
+    reached: routeCost <= actor.radius + 0.55,
+    blockingPieceIds: [],
+    navigationSamples: [],
+    topologyRoute: [],
+    portalIds: [],
+    perception,
+    decision: crowdDecision(actor.id, targetId, objective, routeCost)
+  };
 }
 
 function lineOfSightBlocked(a: Vec2, b: Vec2, pieces: BasePiece[], heightLayer: number): string[] {
@@ -356,10 +408,16 @@ export function computeAiDebug(world: WorldState, options: AiDebugOptions = {}):
   const topology = options.topology ?? buildWorldTopology(livePieces, world.connectors, world.baseCore);
   const influenceField = options.influenceField ?? computeInfluenceField(livePieces, liveTowers, world.actors, world.baseCore);
   const player = world.actors.find((actor) => actor.kind === "player");
-  return world.actors
-    .filter((actor) => actor.kind === "enemy" || actor.kind === "dwarf" || actor.kind === "boss")
+  const hostiles = world.actors.filter((actor) => actor.kind === "enemy" || actor.kind === "dwarf" || actor.kind === "boss");
+  const crowdThreshold = options.crowdThreshold ?? DEFAULT_CROWD_THRESHOLD;
+  const detailedLimit = hostiles.length > crowdThreshold ? (options.maxDetailedActors ?? DEFAULT_MAX_DETAILED_ACTORS) : hostiles.length;
+  let detailedCount = 0;
+  return hostiles
     .map((actor) => {
       const actorKind = actor.kind as "enemy" | "dwarf" | "boss";
+      const detailed = actor.kind === "boss" || detailedCount < detailedLimit;
+      if (!detailed) return crowdAiEntry(world, actor, player, policy);
+      detailedCount += 1;
       const perception = evaluatePerception(world, actor, player, policy, livePieces);
       const { shape, decision } = chooseTarget(world, actor, perception, player, policy, topology, influenceField, livePieces);
       const targetPoint = targetShapePoint(actor, shape);

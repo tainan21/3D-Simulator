@@ -1,4 +1,15 @@
-import { actorCircle, baseCoreCircle, pieceCapsule, pieceHorizontalBounds, pieceSockets, type Actor, type BaseCore, type BasePiece, type TowerPiece } from "../domain/canonical";
+import {
+  actorCircle,
+  baseCoreCircle,
+  pieceCapsule,
+  pieceHorizontalBounds,
+  pieceSockets,
+  type Actor,
+  type BaseCore,
+  type BasePiece,
+  type SurfaceTile,
+  type TowerPiece
+} from "../domain/canonical";
 import { actorOrientation, baseCoreOrientation, pieceOrientation, towerOrientation } from "../domain/orientation";
 import type { WorldState } from "../simulation/worldState";
 import { distance } from "./vector";
@@ -41,6 +52,13 @@ export type GeometryAdapterSnapshot = Readonly<{
     width: number;
     travelCost: number;
   }>;
+  surfaceTiles: Array<{
+    id: string;
+    cell: SurfaceTile["cell"];
+    material: SurfaceTile["material"];
+    intensity: SurfaceTile["intensity"];
+    heightLayer: SurfaceTile["heightLayer"];
+  }>;
   actors: Array<{
     id: string;
     kind: Actor["kind"];
@@ -50,6 +68,8 @@ export type GeometryAdapterSnapshot = Readonly<{
     radius: number;
     height: number;
     facing: Actor["facing"];
+    visual: Actor["visual"];
+    combatProfile?: Actor["combatProfile"];
     pivot: ReturnType<typeof actorOrientation>;
   }>;
   baseCore: {
@@ -107,6 +127,15 @@ export function createGeometryAdapterSnapshot(world: WorldState, adapter: Adapte
       width: connector.width,
       travelCost: connector.travelCost
     })),
+    surfaceTiles: [...(world.surfaceTiles ?? [])]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((tile) => ({
+        id: tile.id,
+        cell: tile.cell,
+        material: tile.material,
+        intensity: tile.intensity,
+        heightLayer: tile.heightLayer
+      })),
     actors: world.actors.map((actor) => ({
       id: actor.id,
       kind: actor.kind,
@@ -116,6 +145,8 @@ export function createGeometryAdapterSnapshot(world: WorldState, adapter: Adapte
       radius: actorCircle(actor).radius,
       height: actor.height,
       facing: actor.facing,
+      visual: actor.visual,
+      combatProfile: actor.combatProfile,
       pivot: actorOrientation(actor)
     })),
     baseCore: {

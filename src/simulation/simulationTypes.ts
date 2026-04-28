@@ -9,4 +9,6 @@ export type AiDebugOptions = Readonly<{
   liveTowers?: TowerPiece[];
   topology?: WorldTopology;
   influenceField?: InfluenceField;
+  crowdThreshold?: number;
+  maxDetailedActors?: number;
 }>;

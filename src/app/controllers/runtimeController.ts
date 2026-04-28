@@ -16,6 +16,8 @@ import { editorFromWorld } from "../../simulation/worldState";
 import type { AppRoute, AppSurfaceContext, ReplayRecord, SurfaceHandle, ViewMode } from "../contracts";
 import { STUDIO_SCENARIOS, loadScenarioPreset } from "../../studio/scenarios";
 import { createCleanupBag, createKeyboardState, type RendererHandle, updatePerformanceSnapshot } from "./common";
+import { materializeCreatedMobs } from "../../domain/createdMob";
+import { createdMobSyncStatus, loadCreatedMobCache } from "../../infrastructure/createdMobCache";
 
 const MODES: ViewMode[] = ["2d", "25d", "3d"];
 const CAMERA_MODES: CameraMode3D[] = ["tactical", "inspection", "first-person"];
@@ -65,6 +67,7 @@ export class RuntimeSurfaceController {
     const loopCleanup = this.context.performance.trackLoop("runtime:loop");
     this.cleanups.add(loopCleanup);
     this.keyboard.attach(this.cleanups);
+    this.applyCreatedMobLibrary();
     this.renderFrame();
     this.attachEvents();
     if (this.state.session) this.mountRenderer();
@@ -351,6 +354,15 @@ export class RuntimeSurfaceController {
           <dt>Tick</dt><dd>${world.tick}</dd>
           <dt>Fase</dt><dd>${world.run.phase}</dd>
           <dt>Base</dt><dd>${world.run.baseCoreHp.toFixed(1)} / ${world.run.baseCoreMaxHp}</dd>
+          <dt>Mobs criados</dt><dd>${world.actors.filter((actor) => actor.id.startsWith("created-mob:")).length}</dd>
+        </dl>
+      </div>
+      <div class="workspace-side-block">
+        <h2>Mob cache</h2>
+        <dl>
+          <dt>Postgres mock</dt><dd>${createdMobSyncStatus().cachedRows} rows</dd>
+          <dt>Blob mock</dt><dd>${createdMobSyncStatus().cachedBlobs} objects</dd>
+          <dt>Auto pull</dt><dd>${loadCreatedMobCache().records.map((record) => record.label).slice(0, 3).join(" | ") || "cache vazio"}</dd>
         </dl>
       </div>
       <div class="workspace-side-block">
@@ -392,8 +404,8 @@ export class RuntimeSurfaceController {
     }
     if (button.dataset.runtimeScenario) {
       const scenarioId = button.dataset.runtimeScenario;
-      const world = loadScenarioPreset(scenarioId, 101);
-      const artifact = createRuntimeBakeArtifact(world, "scenario", `Scenario ${scenarioId}`, 0, scenarioId);
+      const world = this.withCreatedMobs(loadScenarioPreset(scenarioId, 101));
+      const artifact = createRuntimeBakeArtifact(world, "scenario", `Scenario ${scenarioId} + created mobs`, 0, scenarioId);
       const session = materializeRuntimeSession(artifact);
       this.setState((current) => ({ ...current, artifact, session }));
       this.renderFrame();
@@ -497,7 +509,7 @@ export class RuntimeSurfaceController {
 
   private bakeStudioIntoRuntime(): void {
     const studio = this.context.stores.studioStore.getState().session;
-    const artifact = createRuntimeBakeArtifact(studio.world, "studio", `Studio ${studio.scenarioId}`, studio.timeline.tick, studio.scenarioId);
+    const artifact = createRuntimeBakeArtifact(this.withCreatedMobs(studio.world), "studio", `Studio ${studio.scenarioId} + created mobs`, studio.timeline.tick, studio.scenarioId);
     const session = materializeRuntimeSession(artifact);
     this.setState((current) => ({ ...current, artifact, session, replaySession: undefined }));
     this.renderFrame();
@@ -611,6 +623,21 @@ export class RuntimeSurfaceController {
         selectedId: record.id
       };
     });
+  }
+
+  private applyCreatedMobLibrary(): void {
+    const session = this.state.session;
+    if (!session) return;
+    const world = this.withCreatedMobs(session.world);
+    if (world === session.world) return;
+    this.setState((current) => ({
+      ...current,
+      session: current.session ? { ...current.session, world, analysis: computeWorldAnalysis(world, replayStateFromSession(current.replaySession), DEFAULT_AI_POLICY) } : current.session
+    }));
+  }
+
+  private withCreatedMobs(world: ReturnType<typeof loadScenarioPreset>): ReturnType<typeof loadScenarioPreset> {
+    return materializeCreatedMobs(world, loadCreatedMobCache().records);
   }
 
   private modeLabel(mode: ViewMode): string {
