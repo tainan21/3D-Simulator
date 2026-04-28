@@ -44,7 +44,23 @@ import {
   type ForgeTemperament
 } from "../../domain/characterForge";
 import { forgeBuildToCharacterArchetype } from "../../domain/createdMob";
-import { createdMobSyncStatus, exportCreatedMobPayload, importCreatedMobPayload, loadCreatedMobCache, upsertForgeBuildIntoMobCache } from "../../infrastructure/createdMobCache";
+import {
+  createdMobSyncStatus,
+  exportCreatedMobPayload,
+  importCreatedMobPayload,
+  loadCreatedMobCache,
+  subscribeCreatedMobCache,
+  upsertForgeBuildIntoMobCache
+} from "../../infrastructure/createdMobCache";
+
+type ForgeSyncStatus = ReturnType<typeof createdMobSyncStatus>;
+
+interface FocusSnapshot {
+  key: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  scrollTop: number;
+}
 
 type ForgeField =
   | "species"
@@ -87,6 +103,9 @@ export class CharacterForgeController {
   private readonly cleanups = createCleanupBag();
   private state: ForgeState = this.loadState();
   private pointer = { x: 0, y: 0 };
+  // 4.2 — sync status cacheado: lido do mobRepository no mount e atualizado via
+  // subscribe. renderFrame() não chama loadCreatedMobCache() em hot path.
+  private lastSync: ForgeSyncStatus = createdMobSyncStatus(loadCreatedMobCache());
 
   constructor(
     private readonly host: HTMLElement,
@@ -102,6 +121,14 @@ export class CharacterForgeController {
     this.cleanups.add(() => this.host.removeEventListener("click", this.onClick));
     this.cleanups.add(() => this.host.removeEventListener("input", this.onInput));
     this.cleanups.add(() => this.host.removeEventListener("pointermove", this.onPointerMove));
+    // 4.2 — reage a mutações no mob cache (export, send mob, import, ou mudança
+    // vinda de outra surface). Atualiza só os indicadores do pipeline footer.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.lastSync = createdMobSyncStatus(cache);
+        this.refreshSyncIndicators();
+      })
+    );
     return { dispose: () => this.cleanups.dispose() };
   }
 
@@ -146,10 +173,12 @@ export class CharacterForgeController {
   private renderFrame(): void {
     const build = this.state.current;
     const palette = FORGE_PALETTES.find((entry) => entry.id === build.paletteId) ?? FORGE_PALETTES[0];
-    const mobCache = loadCreatedMobCache();
-    const sync = createdMobSyncStatus(mobCache);
+    // 4.2 — sync vem do campo (atualizado via subscribe). Sem I/O por frame.
+    const sync = this.lastSync;
     const archetype = forgeBuildToCharacterArchetype(build);
     const activeMotion = this.state.simulationVerb ?? build.motionProfile.primaryVerb;
+    // 4.3 — preserva foco/seleção entre re-renders.
+    const focus = this.captureFocus();
     this.host.innerHTML = `
       <section class="forge-shell" data-testid="character-forge-shell" style="--forge-primary:${palette.primary};--forge-secondary:${palette.secondary};--forge-glow:${palette.glow};--forge-eye:${palette.eye};--forge-fx:${palette.fx};--forge-tilt-x:${this.pointer.y};--forge-tilt-y:${this.pointer.x};--forge-dash-distance:${build.motionProfile.dashDistance};--forge-speed-burst:${build.motionProfile.speedBurst};">
         <header class="forge-header">
@@ -188,7 +217,7 @@ export class CharacterForgeController {
             </div>
             <label class="forge-mutation">
               <span>Mutation</span>
-              <input type="range" min="0" max="100" value="${build.mutation}" data-forge-mutation>
+              <input type="range" min="0" max="100" value="${build.mutation}" data-forge-mutation data-focus-key="mutation">
               <b>${build.mutation}%</b>
             </label>
           </aside>
@@ -269,6 +298,64 @@ export class CharacterForgeController {
         </footer>
       </section>
     `;
+    // 4.3 — restaura foco/seleção em sliders, inputs e botões ativos.
+    this.restoreFocus(focus);
+  }
+
+  // 4.3 — Captura referência estável de foco antes de regravar innerHTML.
+  // Usa atributos data-* já existentes nos botões/inputs para gerar uma chave
+  // determinística. Range/text inputs preservam selectionStart/End e scroll.
+  private captureFocus(): FocusSnapshot | null {
+    const active = document.activeElement;
+    if (!active || !(active instanceof HTMLElement)) return null;
+    if (!this.host.contains(active)) return null;
+    const key = focusKey(active);
+    if (!key) return null;
+    let selectionStart: number | null = null;
+    let selectionEnd: number | null = null;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = active.selectionStart;
+        selectionEnd = active.selectionEnd;
+      } catch {
+        // Alguns tipos de input (range, color) não suportam selectionStart.
+      }
+    }
+    return { key, selectionStart, selectionEnd, scrollTop: active.scrollTop };
+  }
+
+  private restoreFocus(snapshot: FocusSnapshot | null): void {
+    if (!snapshot) return;
+    const target = this.host.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(snapshot.key)}"]`);
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.scrollTop = snapshot.scrollTop;
+    if (
+      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+      snapshot.selectionStart !== null
+    ) {
+      try {
+        target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd ?? snapshot.selectionStart);
+      } catch {
+        // Inputs do tipo range não permitem setSelectionRange. Ignoramos.
+      }
+    }
+  }
+
+  // 4.2 — atualização parcial do rodapé "pipeline" (Postgres/Blob mock + mob output).
+  // Evita re-render completo quando outra surface muda o cache de mobs.
+  private refreshSyncIndicators(): void {
+    const panel = this.host.querySelector<HTMLElement>(".forge-pipeline");
+    if (!panel) return;
+    const sync = this.lastSync;
+    const cells = panel.querySelectorAll<HTMLElement>(":scope > div");
+    if (cells.length < 3) return;
+    const postgresStrong = cells[1].querySelector<HTMLElement>("strong");
+    const postgresEm = cells[1].querySelector<HTMLElement>("em");
+    const blobStrong = cells[2].querySelector<HTMLElement>("strong");
+    if (postgresStrong) postgresStrong.textContent = `${sync.cachedRows} rows`;
+    if (postgresEm) postgresEm.textContent = sync.lastSyncLabel;
+    if (blobStrong) blobStrong.textContent = `${sync.cachedBlobs} objects`;
   }
 
   private renderOptionGroup<T extends string>(title: string, field: ForgeField, options: readonly T[]): string {
@@ -581,4 +668,31 @@ function hash(input: string): number {
   let value = 2166136261;
   for (let index = 0; index < input.length; index += 1) value = Math.imul(value ^ input.charCodeAt(index), 16777619);
   return value >>> 0;
+}
+
+// 4.3 — Gera chave estável de foco a partir dos data-* já existentes. Cobre os
+// principais alvos do Forge (sliders, botões de field/value, presets, skills,
+// motion, animation, action, favorite). Sem isso, perderíamos foco a cada
+// re-render porque innerHTML descarta a árvore inteira.
+function focusKey(element: HTMLElement): string | null {
+  const explicit = element.dataset.focusKey;
+  if (explicit) return explicit;
+  const ds = element.dataset;
+  if (ds.forgeMutation !== undefined) return "mutation";
+  if (ds.forgeField && ds.forgeValue) return `field:${ds.forgeField}:${ds.forgeValue}`;
+  if (ds.forgeSkillSlot && ds.forgeSkill) return `skill:${ds.forgeSkillSlot}:${ds.forgeSkill}`;
+  if (ds.forgePreset) return `preset:${ds.forgePreset}`;
+  if (ds.forgeFavorite) return `favorite:${ds.forgeFavorite}`;
+  if (ds.forgeAnimation) return `animation:${ds.forgeAnimation}`;
+  if (ds.forgeMotion) return `motion:${ds.forgeMotion}`;
+  if (ds.forgeAction) return `action:${ds.forgeAction}`;
+  if (ds.route) return `route:${ds.route}`;
+  return null;
+}
+
+// CSS.escape polyfill leve. Os tokens que produzimos só contêm letras, dígitos,
+// `:` e `-`, então um escape mínimo basta. Usamos a nativa quando existir.
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
