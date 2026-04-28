@@ -9,7 +9,9 @@
 
 export type StorageMode = "remote" | "local" | "hybrid";
 
-const FALLBACK: StorageMode = "hybrid";
+// Default seguro para Fase 3: local-only. Liga remoto via VITE_STORAGE_MODE
+// ("hybrid" para sync em background, "remote" para usar API direto).
+const FALLBACK: StorageMode = "local";
 
 export function getStorageMode(): StorageMode {
   const env = (import.meta as ImportMeta & {

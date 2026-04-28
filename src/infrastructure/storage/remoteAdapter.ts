@@ -47,7 +47,21 @@ export function createRemoteAdapter<T extends Identifiable>(
     async list(): Promise<T[]> {
       const data = await jsonFetch<Record<string, unknown>>(opts.endpoint);
       const rows = (data[listField] as unknown[] | undefined) ?? [];
-      return rows.map(deserialize);
+      // Tolerante: se uma row vier como metadata-only (sem payload obrigatório),
+      // o deserialize pode jogar; nesse caso pulamos o item e seguimos. Evita
+      // que o reconcile do HybridAdapter exploda em listagens parciais.
+      const out: T[] = [];
+      for (const row of rows) {
+        try {
+          out.push(deserialize(row));
+        } catch (err) {
+          console.warn(
+            `[remoteAdapter] item ignorado em ${opts.endpoint}:`,
+            (err as Error).message,
+          );
+        }
+      }
+      return out;
     },
     async put(item: T): Promise<T> {
       const data = await jsonFetch<Record<string, unknown>>(opts.endpoint, {
