@@ -34,7 +34,7 @@ import { applyStudioRecipe, STUDIO_RECIPES, type StudioRecipeId } from "../../st
 import { STUDIO_SCENARIOS } from "../../studio/scenarios";
 import { ACTOR_VISUAL_BRUSHES, paintSurfaceTile, pointToSurfaceCell, SURFACE_BRUSHES, withActorVisual } from "../../studio/surfaceStudio";
 import { materializeCreatedMobs } from "../../domain/createdMob";
-import { createdMobSyncStatus, loadCreatedMobCache } from "../../infrastructure/createdMobCache";
+import { createdMobSyncStatus, loadCreatedMobCache, subscribeCreatedMobCache } from "../../infrastructure/createdMobCache";
 import { rafThrottle } from "../utils/rafThrottle";
 import { idleDebounce } from "../utils/idleDebounce";
 import { attachVisibilityPause } from "../utils/visibilityPause";
@@ -135,6 +135,11 @@ export class StudioSurfaceController {
     startHeight: number;
   };
 
+  // 4.2 — mob cache cacheado: lido do mobRepository no construtor e atualizado
+  // via subscribe. renderFrame() não chama loadCreatedMobCache() em hot path.
+  private mobCache = loadCreatedMobCache();
+  private mobSync = createdMobSyncStatus(this.mobCache);
+
   // 4.4 — palette-search reescreve o painel esquerdo inteiro por keystroke.
   // Debounce 180ms agrupa "digitação rápida" sem deixar o usuário sentir lag.
   private readonly applyPaletteSearch = idleDebounce(() => {
@@ -161,6 +166,14 @@ export class StudioSurfaceController {
     const loopCleanup = this.context.performance.trackLoop("studio:loop");
     this.cleanups.add(loopCleanup);
     this.keyboard.attach(this.cleanups);
+    // 4.2 — assina o cache de mobs criados. O próximo loop tick relê os campos
+    // cacheados, sem precisar de re-render full extra.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.mobCache = cache;
+        this.mobSync = createdMobSyncStatus(cache);
+      })
+    );
     this.renderFrame();
     this.attachEvents();
     this.mountRenderers();
@@ -805,8 +818,9 @@ export class StudioSurfaceController {
     const enemy = this.session.enemyWorkbench.archetype;
     const parity = createGeometryParityReport(this.session.world);
     const surfaceCount = this.session.world.surfaceTiles?.length ?? 0;
-    const createdMobCache = loadCreatedMobCache();
-    const sync = createdMobSyncStatus(createdMobCache);
+    // 4.2 — lê do campo (atualizado via subscribe). Sem I/O por frame.
+    const createdMobCache = this.mobCache;
+    const sync = this.mobSync;
     return `
       <div class="studio-resize-handle studio-resize-side" data-resize-handle="side" aria-hidden="true"></div>
       <div class="studio-panel-rail studio-side-rail"><span>Inspect</span><button data-panel-toggle="side">${this.sidePanelCollapsed ? "Open" : "Hide"}</button></div>

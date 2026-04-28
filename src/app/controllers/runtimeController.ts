@@ -17,7 +17,7 @@ import type { AppRoute, AppSurfaceContext, ReplayRecord, SurfaceHandle, ViewMode
 import { STUDIO_SCENARIOS, loadScenarioPreset } from "../../studio/scenarios";
 import { createCleanupBag, createKeyboardState, type RendererHandle, updatePerformanceSnapshot } from "./common";
 import { materializeCreatedMobs } from "../../domain/createdMob";
-import { createdMobSyncStatus, loadCreatedMobCache } from "../../infrastructure/createdMobCache";
+import { createdMobSyncStatus, loadCreatedMobCache, subscribeCreatedMobCache } from "../../infrastructure/createdMobCache";
 
 const MODES: ViewMode[] = ["2d", "25d", "3d"];
 const CAMERA_MODES: CameraMode3D[] = ["tactical", "inspection", "first-person"];
@@ -57,6 +57,9 @@ export class RuntimeSurfaceController {
   private simMs = 0;
   private isDraggingCamera = false;
   private lastPointer?: { x: number; y: number };
+  // 4.2 — mob cache cacheado (atualizado via subscribe). Render lê do campo.
+  private mobCache = loadCreatedMobCache();
+  private mobSync = createdMobSyncStatus(this.mobCache);
 
   constructor(
     private readonly host: HTMLElement,
@@ -67,6 +70,14 @@ export class RuntimeSurfaceController {
     const loopCleanup = this.context.performance.trackLoop("runtime:loop");
     this.cleanups.add(loopCleanup);
     this.keyboard.attach(this.cleanups);
+    // 4.2 — assina mudanças no cache; quando outra surface (ex: Forge) cria
+    // um mob novo, o painel "Mob cache" do Runtime reflete sem polling.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.mobCache = cache;
+        this.mobSync = createdMobSyncStatus(cache);
+      })
+    );
     this.applyCreatedMobLibrary();
     this.renderFrame();
     this.attachEvents();
@@ -360,9 +371,9 @@ export class RuntimeSurfaceController {
       <div class="workspace-side-block">
         <h2>Mob cache</h2>
         <dl>
-          <dt>Postgres mock</dt><dd>${createdMobSyncStatus().cachedRows} rows</dd>
-          <dt>Blob mock</dt><dd>${createdMobSyncStatus().cachedBlobs} objects</dd>
-          <dt>Auto pull</dt><dd>${loadCreatedMobCache().records.map((record) => record.label).slice(0, 3).join(" | ") || "cache vazio"}</dd>
+          <dt>Postgres mock</dt><dd>${this.mobSync.cachedRows} rows</dd>
+          <dt>Blob mock</dt><dd>${this.mobSync.cachedBlobs} objects</dd>
+          <dt>Auto pull</dt><dd>${this.mobCache.records.map((record) => record.label).slice(0, 3).join(" | ") || "cache vazio"}</dd>
         </dl>
       </div>
       <div class="workspace-side-block">
