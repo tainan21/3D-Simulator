@@ -72,10 +72,17 @@ export class RuntimeSurfaceController {
     this.keyboard.attach(this.cleanups);
     // 4.2 — assina mudanças no cache; quando outra surface (ex: Forge) cria
     // um mob novo, o painel "Mob cache" do Runtime reflete sem polling.
+    // Auto-pull só é aplicado quando não há gravação/reprodução de replay
+    // ativa, para preservar determinismo (frames já assinados não podem
+    // ganhar atores retroativamente).
     this.cleanups.add(
       subscribeCreatedMobCache((cache) => {
         this.mobCache = cache;
         this.mobSync = createdMobSyncStatus(cache);
+        const replayStatus = this.state.replaySession?.status;
+        if (replayStatus !== "recording" && replayStatus !== "playing") {
+          this.applyCreatedMobLibrary();
+        }
       })
     );
     this.applyCreatedMobLibrary();
