@@ -1,13 +1,20 @@
 import { DEFAULT_DEBUG_OVERLAYS } from "../domain/debug";
 import { createUniverseState, materializeUniverseRegion } from "../domain/universe";
-import { DEFAULT_CHARACTER_ARCHETYPE } from "../domain/entityArchetype";
+import { DEFAULT_CHARACTER_ARCHETYPE, type CharacterArchetype } from "../domain/entityArchetype";
 import { materializeRuntimeSession, type RuntimeBakeArtifact } from "../runtime/materialize";
-import { loadCreatedMobCache } from "../infrastructure/createdMobCache";
 import { computeWorldAnalysis } from "../simulation/analysis";
 import { DEFAULT_AI_POLICY } from "../simulation/aiPolicy";
 import { createReplayState } from "../simulation/replay";
-import { editorFromWorld, createPhaseWorld } from "../simulation/worldState";
+import { editorFromWorld } from "../simulation/worldState";
 import { createStudioSession } from "../studio/session";
+import { archetypeRepository } from "../infrastructure/repo/archetypeRepository";
+import { mobRepository } from "../infrastructure/repo/mobRepository";
+import {
+  runtimeArtifactRepository,
+  readLatestRuntimeArtifact,
+} from "../infrastructure/repo/runtimeArtifactRepository";
+import { replayRepository } from "../infrastructure/repo/replayRepository";
+import { readSetting, writeSetting } from "../infrastructure/repo/settingsRepository";
 import type {
   AppStores,
   CharacterStudioState,
@@ -19,16 +26,23 @@ import type {
   ReplayStoreState,
   RuntimeWorkspaceState,
   SettingsState,
-  StudioWorkspaceState
+  StudioWorkspaceState,
 } from "./contracts";
 import { createStore } from "./store";
 
-const STORAGE_KEYS = {
-  settings: "rogue-shell-settings",
-  characters: "rogue-shell-characters",
-  runtimeArtifact: "rogue-shell-runtime-artifact",
-  replayRecords: "rogue-shell-replays"
+// Chaves canônicas em settingsRepository (sucessoras das antigas chaves de localStorage).
+// A migração one-shot já populou estas chaves a partir dos saves legados.
+const SETTING_KEYS = {
+  preset: "settings:preset",
+  charactersUi: "characters:ui",
 } as const;
+
+interface CharactersUiPrefs {
+  selectedId?: string;
+  view?: CharacterStudioState["view"];
+  camera3D?: CameraStateSeed;
+  archetypeId?: string;
+}
 
 const DEFAULT_CAMERA: CameraStateSeed = {
   mode: "inspection",
@@ -37,7 +51,7 @@ const DEFAULT_CAMERA: CameraStateSeed = {
   distance: 10.8,
   eyeHeight: 1,
   focusTarget: "core",
-  panOffset: { x: 0, z: 0 }
+  panOffset: { x: 0, z: 0 },
 };
 
 const DEFAULT_STUDIO_CAMERA: CameraStateSeed = {
@@ -47,7 +61,7 @@ const DEFAULT_STUDIO_CAMERA: CameraStateSeed = {
   distance: 12.5,
   eyeHeight: 1,
   focusTarget: "selected",
-  panOffset: { x: 0, z: 0 }
+  panOffset: { x: 0, z: 0 },
 };
 
 function cloneDefaultDebugOverlays() {
@@ -67,25 +81,8 @@ function cloneDefaultDebugOverlays() {
     navigation: false,
     influence: false,
     damage: false,
-    diagnostics: false
+    diagnostics: false,
   };
-}
-
-function readJson<T>(key: string): T | undefined {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function writeJson<T>(key: string, value: T): void {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Ignore persistence failures.
-  }
 }
 
 function detectMobile(): boolean {
@@ -98,44 +95,91 @@ function initialPreset(isMobile: boolean): PerformancePreset {
 
 function loadSettings(): SettingsState {
   const isMobile = detectMobile();
-  const stored = readJson<Partial<SettingsState>>(STORAGE_KEYS.settings);
+  const storedPreset = readSetting<PerformancePreset>(SETTING_KEYS.preset);
   return {
-    preset: stored?.preset ?? initialPreset(isMobile),
-    isMobile
+    preset: storedPreset ?? initialPreset(isMobile),
+    isMobile,
   };
 }
 
 function loadRuntimeArtifact(): RuntimeBakeArtifact | undefined {
-  return readJson<RuntimeBakeArtifact>(STORAGE_KEYS.runtimeArtifact);
+  return readLatestRuntimeArtifact();
 }
 
 function loadReplayRecords(): ReplayStoreState {
-  const records = readJson<ReplayRecord[]>(STORAGE_KEYS.replayRecords) ?? [];
+  const records = replayRepository()
+    .snapshot()
+    .slice()
+    .sort((a, b) => b.createdAt - a.createdAt);
   return { records };
 }
 
 function loadCharacters(): CharacterStudioState {
-  const stored = readJson<Partial<CharacterStudioState>>(STORAGE_KEYS.characters);
-  const cachedMobs = loadCreatedMobCache().records.map((record) => record.archetype);
-  const storedLibrary = stored?.library?.length ? stored.library : [DEFAULT_CHARACTER_ARCHETYPE];
-  const library = [...cachedMobs, ...storedLibrary.filter((entry) => !cachedMobs.some((mob) => mob.id === entry.id))];
-  const archetype = stored?.archetype ?? library[0] ?? DEFAULT_CHARACTER_ARCHETYPE;
+  const ui = readSetting<CharactersUiPrefs>(SETTING_KEYS.charactersUi);
+  const storedArchetypes = archetypeRepository().snapshot();
+  const cachedMobs = mobRepository()
+    .snapshot()
+    .map((record) => record.archetype);
+
+  // Library: mobs do Forge primeiro, depois archetypes salvos, depois DEFAULT
+  // como fallback. Dedupe por id preservando a ordem original.
+  const library: CharacterArchetype[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...cachedMobs, ...storedArchetypes, DEFAULT_CHARACTER_ARCHETYPE]) {
+    if (!seen.has(entry.id)) {
+      seen.add(entry.id);
+      library.push(entry);
+    }
+  }
+
+  // Archetype selecionado: ID das prefs → fallback library[0] → default.
+  const archetype =
+    library.find((entry) => entry.id === ui?.archetypeId) ??
+    library[0] ??
+    DEFAULT_CHARACTER_ARCHETYPE;
+
   return {
     archetype,
     library,
-    selectedId: stored?.selectedId ?? archetype.id,
-    view: stored?.view ?? "25d",
-    camera3D: stored?.camera3D ?? { ...DEFAULT_STUDIO_CAMERA }
+    selectedId: ui?.selectedId ?? archetype.id,
+    view: ui?.view ?? "25d",
+    camera3D: ui?.camera3D ?? { ...DEFAULT_STUDIO_CAMERA },
   };
 }
 
 export function persistRuntimeArtifact(artifact?: RuntimeBakeArtifact): void {
   if (!artifact) return;
-  writeJson(STORAGE_KEYS.runtimeArtifact, artifact);
+  // Repository é sync para o cache em memória; flush é diferido (idle + debounce).
+  runtimeArtifactRepository().upsert(artifact);
 }
 
 export function persistReplayRecords(records: ReplayRecord[]): void {
-  writeJson(STORAGE_KEYS.replayRecords, records);
+  const repo = replayRepository();
+  const desired = new Map(records.filter((r) => r?.id).map((r) => [r.id, r]));
+  const current = new Map(repo.snapshot().map((r) => [r.id, r]));
+
+  // Remove os que sumiram.
+  for (const id of current.keys()) {
+    if (!desired.has(id)) repo.remove(id);
+  }
+  // Upsert todos os atuais (dedupe interno via equals).
+  for (const record of desired.values()) {
+    repo.upsert(record);
+  }
+}
+
+function persistCharactersUi(state: CharacterStudioState): void {
+  // Archetype atual e library inteira: deixa o repo dedupe via equals.
+  archetypeRepository().upsert(state.archetype);
+  for (const entry of state.library) {
+    archetypeRepository().upsert(entry);
+  }
+  writeSetting<CharactersUiPrefs>(SETTING_KEYS.charactersUi, {
+    selectedId: state.selectedId,
+    view: state.view,
+    camera3D: state.camera3D,
+    archetypeId: state.archetype.id,
+  });
 }
 
 export function createAppStores(): AppStores {
@@ -149,25 +193,25 @@ export function createAppStores(): AppStores {
   const runtime = storedArtifact ? materializeRuntimeSession(storedArtifact) : undefined;
 
   const settingsStore = createStore<SettingsState>(settings);
-  settingsStore.subscribe((next) => writeJson(STORAGE_KEYS.settings, next));
+  settingsStore.subscribe((next) => writeSetting(SETTING_KEYS.preset, next.preset));
 
   const studioStore = createStore<StudioWorkspaceState>({
     session: studioSession,
     view: "25d",
     tool: "fence",
     debugOverlays: cloneDefaultDebugOverlays(),
-    camera3D: { ...DEFAULT_STUDIO_CAMERA }
+    camera3D: { ...DEFAULT_STUDIO_CAMERA },
   });
 
   const characterStudioStore = createStore<CharacterStudioState>(characters);
-  characterStudioStore.subscribe((next) => writeJson(STORAGE_KEYS.characters, next));
+  characterStudioStore.subscribe(persistCharactersUi);
 
   const harnessStore = createStore<HarnessState>({
     debugOverlays: { ...cloneDefaultDebugOverlays(), enabled: true, diagnostics: true, bounds: true },
     camera3D: { ...DEFAULT_STUDIO_CAMERA },
     show2D: !settings.isMobile,
     show25D: true,
-    show3D: true
+    show3D: true,
   });
 
   const phasesStore = createStore<PhasesWorkspaceState>({
@@ -181,7 +225,7 @@ export function createAppStores(): AppStores {
     mode: "25d",
     tool: "fence",
     debugOverlays: cloneDefaultDebugOverlays(),
-    camera3D: { ...DEFAULT_CAMERA }
+    camera3D: { ...DEFAULT_CAMERA },
   });
 
   const runtimeStore = createStore<RuntimeWorkspaceState>({
@@ -190,7 +234,7 @@ export function createAppStores(): AppStores {
     mode: "3d",
     debugOverlays: cloneDefaultDebugOverlays(),
     camera3D: { ...DEFAULT_CAMERA },
-    replaySession: undefined
+    replaySession: undefined,
   });
 
   runtimeStore.subscribe((state) => {
@@ -207,6 +251,6 @@ export function createAppStores(): AppStores {
     harnessStore,
     phasesStore,
     runtimeStore,
-    replayStore
+    replayStore,
   };
 }

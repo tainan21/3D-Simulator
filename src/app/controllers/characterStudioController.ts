@@ -22,7 +22,7 @@ import { createGeometryParityReport } from "../../studio/geometryParity";
 import type { WorldState } from "../../simulation/worldState";
 import { createRuntimeBakeArtifact, materializeRuntimeSession } from "../../runtime/materialize";
 import { createCreatedMobPackageFromArchetype, createdMobRecordFromPackage } from "../../domain/createdMob";
-import { importCreatedMobPayload, loadCreatedMobCache, upsertCreatedMobRecord } from "../../infrastructure/createdMobCache";
+import { importCreatedMobPayload, loadCreatedMobCache, subscribeCreatedMobCache, upsertCreatedMobRecord } from "../../infrastructure/createdMobCache";
 import { PhaserGeometryRenderer } from "../../render/phaserGeometryRenderer";
 import { ThreeValidationRenderer } from "../../render/threeValidationRenderer";
 import type { AppRoute, AppSurfaceContext, SurfaceHandle, ViewMode } from "../contracts";
@@ -56,6 +56,8 @@ export class CharacterStudioController {
   private readonly renderers = new Map<string, RendererHandle>();
   private readonly rendererCanvasCleanups: Array<() => void> = [];
   private previewWorld: WorldState = createCharacterPreviewWorld(DEFAULT_CHARACTER_ARCHETYPE);
+  // 4.2 — mob cache cacheado: render lê do campo, subscribe atualiza.
+  private mobCache = loadCreatedMobCache();
 
   constructor(
     private readonly host: HTMLElement,
@@ -64,6 +66,14 @@ export class CharacterStudioController {
 
   mount(): SurfaceHandle {
     this.previewWorld = createCharacterPreviewWorld(this.archetype);
+    // 4.2 — sincroniza painéis quando o Forge envia novo mob enquanto a tela
+    // de Characters já está montada. Atualiza inspector + bottom sem polling.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.mobCache = cache;
+        this.updateInspector();
+      })
+    );
     this.renderFrame();
     this.attachEvents();
     this.mountRenderers();
@@ -410,7 +420,8 @@ export class CharacterStudioController {
     const attack = ATTACK_PATTERNS.find((entry) => entry.id === this.archetype.attackId) ?? ATTACK_PATTERNS[0];
     const behavior = BEHAVIOR_PATTERNS.find((entry) => entry.id === this.archetype.behaviorId) ?? BEHAVIOR_PATTERNS[0];
     const parity = createGeometryParityReport(this.previewWorld);
-    const createdCache = loadCreatedMobCache();
+    // 4.2 — usa o campo (atualizado via subscribe). Sem I/O por inspector tick.
+    const createdCache = this.mobCache;
     if (inspector) {
       inspector.innerHTML = `
         <section class="studio-panel-block parity-gate ${parity.ok ? "ok" : "fail"}">
@@ -480,7 +491,8 @@ export class CharacterStudioController {
   }
 
   private createdMobButtons(): string {
-    const records = loadCreatedMobCache().records;
+    // 4.2 — leitura cacheada; mantemos consistência com updateInspector().
+    const records = this.mobCache.records;
     if (records.length === 0) return `<div class="empty-state">Nenhum mob exportado do Forge ainda.</div>`;
     return records
       .map(

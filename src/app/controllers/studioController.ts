@@ -34,7 +34,11 @@ import { applyStudioRecipe, STUDIO_RECIPES, type StudioRecipeId } from "../../st
 import { STUDIO_SCENARIOS } from "../../studio/scenarios";
 import { ACTOR_VISUAL_BRUSHES, paintSurfaceTile, pointToSurfaceCell, SURFACE_BRUSHES, withActorVisual } from "../../studio/surfaceStudio";
 import { materializeCreatedMobs } from "../../domain/createdMob";
-import { createdMobSyncStatus, loadCreatedMobCache } from "../../infrastructure/createdMobCache";
+import { createdMobSyncStatus, loadCreatedMobCache, subscribeCreatedMobCache } from "../../infrastructure/createdMobCache";
+import { readSetting, writeSetting } from "../../infrastructure/repo/settingsRepository";
+import { rafThrottle } from "../utils/rafThrottle";
+import { idleDebounce } from "../utils/idleDebounce";
+import { attachVisibilityPause } from "../utils/visibilityPause";
 import {
   materializeStudioTimelineWorld,
   replayStudioSession,
@@ -132,6 +136,28 @@ export class StudioSurfaceController {
     startHeight: number;
   };
 
+  // 4.2 — mob cache cacheado: lido do mobRepository no construtor e atualizado
+  // via subscribe. renderFrame() não chama loadCreatedMobCache() em hot path.
+  private mobCache = loadCreatedMobCache();
+  private mobSync = createdMobSyncStatus(this.mobCache);
+
+  // 4.4 — palette-search reescreve o painel esquerdo inteiro por keystroke.
+  // Debounce 180ms agrupa "digitação rápida" sem deixar o usuário sentir lag.
+  private readonly applyPaletteSearch = idleDebounce(() => {
+    const left = this.host.querySelector<HTMLElement>("#studio-left .studio-panel-content");
+    if (left) left.innerHTML = this.leftPanelHtml();
+  }, 180);
+
+  // 4.4 — escrever prefs de painel a cada keystroke do slider tira o thread
+  // do main por 1-2ms. Idle debounce: o usuário precisa parar antes de salvar.
+  private readonly persistPanelPrefs = idleDebounce(() => {
+    this.writeUiPrefs({
+      leftPanelWidth: this.leftPanelWidth,
+      sidePanelWidth: this.sidePanelWidth,
+      bottomPanelHeight: this.bottomPanelHeight
+    });
+  }, 220);
+
   constructor(
     private readonly host: HTMLElement,
     private readonly context: AppSurfaceContext
@@ -141,6 +167,14 @@ export class StudioSurfaceController {
     const loopCleanup = this.context.performance.trackLoop("studio:loop");
     this.cleanups.add(loopCleanup);
     this.keyboard.attach(this.cleanups);
+    // 4.2 — assina o cache de mobs criados. O próximo loop tick relê os campos
+    // cacheados, sem precisar de re-render full extra.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.mobCache = cache;
+        this.mobSync = createdMobSyncStatus(cache);
+      })
+    );
     this.renderFrame();
     this.attachEvents();
     this.mountRenderers();
@@ -165,6 +199,10 @@ export class StudioSurfaceController {
   }
 
   private dispose(): void {
+    // 4.4 — antes de soltar a UI, garanta que nada que o usuário acabou de
+    // digitar/arrastar fique pendente. flush() executa o lastArgs imediato.
+    this.applyPaletteSearch.flush();
+    this.persistPanelPrefs.flush();
     while (this.rendererCanvasCleanups.length > 0) this.rendererCanvasCleanups.pop()?.();
     this.renderers.forEach((renderer) => renderer.destroy());
     this.renderers.clear();
@@ -191,19 +229,13 @@ export class StudioSurfaceController {
   }
 
   private readUiPrefs(): Record<string, unknown> {
-    try {
-      return JSON.parse(window.localStorage.getItem(STUDIO_UI_STORAGE_KEY) ?? "{}") as Record<string, unknown>;
-    } catch {
-      return {};
-    }
+    // Lê do settingsRepository (snapshot síncrono em memória, sem I/O).
+    return readSetting<Record<string, unknown>>(STUDIO_UI_STORAGE_KEY) ?? {};
   }
 
   private writeUiPrefs(patch: Record<string, unknown>): void {
-    try {
-      window.localStorage.setItem(STUDIO_UI_STORAGE_KEY, JSON.stringify({ ...this.readUiPrefs(), ...patch }));
-    } catch {
-      // Studio preferences are convenience-only.
-    }
+    // Flush diferido via idle + debounce — UI nunca toca storage diretamente.
+    writeSetting(STUDIO_UI_STORAGE_KEY, { ...this.readUiPrefs(), ...patch });
   }
 
   private readUiNumber(key: string, fallback: number): number {
@@ -508,7 +540,10 @@ export class StudioSurfaceController {
       this.isDraggingCamera = true;
       this.lastPointer = { x: event.clientX, y: event.clientY };
     };
-    const onPointerMove = (event: PointerEvent) => {
+    // 4.4 — coalesce eventos contínuos em 1 disparo por animation frame.
+    // Em monitores 144Hz isso evita 2-3x setStates por frame de simulação,
+    // sem alterar a precisão visual (o último evento sempre vence).
+    const onPointerMove = rafThrottle((event: PointerEvent) => {
       if (this.resizingPanel) {
         this.resizeStudioPanel(event);
         return;
@@ -525,7 +560,7 @@ export class StudioSurfaceController {
           pitch: clamp(current.camera3D.pitch - dy * 0.006, -1.1, 0.72)
         }
       }));
-    };
+    });
     const onPointerUp = () => {
       if (this.resizingPanel) {
         this.writeUiPrefs({
@@ -539,7 +574,9 @@ export class StudioSurfaceController {
       this.isDraggingCamera = false;
       this.lastPointer = undefined;
     };
-    const onMouseMove = (event: MouseEvent) => {
+    // 4.4 — pointer lock dispara movimento absurdamente alto; rAF coalesce.
+    // movementX/Y do último evento são os que importam para look-around.
+    const onMouseMove = rafThrottle((event: MouseEvent) => {
       if (this.state.view !== "3d" || this.state.camera3D.mode !== "first-person") return;
       const canvas = this.host.querySelector<HTMLCanvasElement>("#studio-host-3d canvas");
       if (!canvas || document.pointerLockElement !== canvas) return;
@@ -551,7 +588,7 @@ export class StudioSurfaceController {
           pitch: clamp(current.camera3D.pitch - event.movementY * 0.0018, -1.15, 0.9)
         }
       }));
-    };
+    });
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -596,6 +633,10 @@ export class StudioSurfaceController {
     this.cleanups.add(() => window.removeEventListener("pointerup", onPointerUp));
     this.cleanups.add(() => window.removeEventListener("mousemove", onMouseMove));
     this.cleanups.add(() => window.removeEventListener("keydown", onKeyDown));
+    // 4.4 — cancelar rAFs pendentes na desmontagem evita callbacks órfãos
+    // tentando ler estado já descartado.
+    this.cleanups.add(() => onPointerMove.cancel());
+    this.cleanups.add(() => onMouseMove.cancel());
   }
 
   private resizeStudioPanel(event: PointerEvent): void {
@@ -673,6 +714,8 @@ export class StudioSurfaceController {
       this.renderers.set("2d", renderer);
       const canvas = host2D.querySelector("canvas");
       if (canvas) this.rendererCanvasCleanups.push(this.context.performance.trackCanvas("studio:2d"));
+      // 4.5 — pausa quando o host 2D sai da viewport (clean/presentation/compact).
+      this.rendererCanvasCleanups.push(attachVisibilityPause(host2D, renderer));
     }
 
     if (host25D) {
@@ -693,6 +736,7 @@ export class StudioSurfaceController {
       this.renderers.set("25d", renderer);
       const canvas = host25D.querySelector("canvas");
       if (canvas) this.rendererCanvasCleanups.push(this.context.performance.trackCanvas("studio:25d"));
+      this.rendererCanvasCleanups.push(attachVisibilityPause(host25D, renderer));
     }
 
     if (host3D) {
@@ -705,6 +749,7 @@ export class StudioSurfaceController {
       this.renderers.set("3d", renderer);
       const canvas = host3D.querySelector("canvas");
       if (canvas) this.rendererCanvasCleanups.push(this.context.performance.trackCanvas("studio:3d"));
+      this.rendererCanvasCleanups.push(attachVisibilityPause(host3D, renderer));
     }
   }
 
@@ -768,8 +813,9 @@ export class StudioSurfaceController {
     const enemy = this.session.enemyWorkbench.archetype;
     const parity = createGeometryParityReport(this.session.world);
     const surfaceCount = this.session.world.surfaceTiles?.length ?? 0;
-    const createdMobCache = loadCreatedMobCache();
-    const sync = createdMobSyncStatus(createdMobCache);
+    // 4.2 — lê do campo (atualizado via subscribe). Sem I/O por frame.
+    const createdMobCache = this.mobCache;
+    const sync = this.mobSync;
     return `
       <div class="studio-resize-handle studio-resize-side" data-resize-handle="side" aria-hidden="true"></div>
       <div class="studio-panel-rail studio-side-rail"><span>Inspect</span><button data-panel-toggle="side">${this.sidePanelCollapsed ? "Open" : "Hide"}</button></div>
@@ -1249,9 +1295,10 @@ export class StudioSurfaceController {
   private handleInput(event: Event): void {
     const target = event.target as HTMLElement;
     if (target instanceof HTMLInputElement && target.dataset.studioField === "palette-search") {
+      // 4.4 — guarda o valor síncrono (para o próximo render full ler), e
+      // debounce o reflow caro do painel esquerdo.
       this.paletteSearch = target.value;
-      const left = this.host.querySelector<HTMLElement>("#studio-left .studio-panel-content");
-      if (left) left.innerHTML = this.leftPanelHtml();
+      this.applyPaletteSearch();
       return;
     }
     if (target instanceof HTMLInputElement && target.dataset.studioField === "timeline") {
@@ -1264,8 +1311,10 @@ export class StudioSurfaceController {
       if (target.dataset.panelSize === "left") this.leftPanelWidth = value;
       if (target.dataset.panelSize === "side") this.sidePanelWidth = value;
       if (target.dataset.panelSize === "bottom") this.bottomPanelHeight = value;
-      this.writeUiPrefs({ leftPanelWidth: this.leftPanelWidth, sidePanelWidth: this.sidePanelWidth, bottomPanelHeight: this.bottomPanelHeight });
+      // 4.4 — atualiza CSS vars na hora (visual responsivo) mas adia
+      // localStorage write para idle. Antes: I/O síncrono por keystroke.
       this.updatePanelVars();
+      this.persistPanelPrefs();
       return;
     }
     if (target instanceof HTMLInputElement && target.dataset.studioField === "compare") {

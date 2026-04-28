@@ -44,7 +44,26 @@ import {
   type ForgeTemperament
 } from "../../domain/characterForge";
 import { forgeBuildToCharacterArchetype } from "../../domain/createdMob";
-import { createdMobSyncStatus, exportCreatedMobPayload, importCreatedMobPayload, loadCreatedMobCache, upsertForgeBuildIntoMobCache } from "../../infrastructure/createdMobCache";
+import {
+  createdMobSyncStatus,
+  exportCreatedMobPayload,
+  importCreatedMobPayload,
+  loadCreatedMobCache,
+  subscribeCreatedMobCache,
+  upsertForgeBuildIntoMobCache
+} from "../../infrastructure/createdMobCache";
+import { createForgeAnimator, type ForgeAnimatorHandle } from "../../runtime/forgeAnimator";
+import { attachVisibilityPause } from "../utils/visibilityPause";
+import { readSetting, writeSetting } from "../../infrastructure/repo/settingsRepository";
+
+type ForgeSyncStatus = ReturnType<typeof createdMobSyncStatus>;
+
+interface FocusSnapshot {
+  key: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  scrollTop: number;
+}
 
 type ForgeField =
   | "species"
@@ -87,6 +106,16 @@ export class CharacterForgeController {
   private readonly cleanups = createCleanupBag();
   private state: ForgeState = this.loadState();
   private pointer = { x: 0, y: 0 };
+  // 4.2 — sync status cacheado: lido do mobRepository no mount e atualizado via
+  // subscribe. renderFrame() não chama loadCreatedMobCache() em hot path.
+  private lastSync: ForgeSyncStatus = createdMobSyncStatus(loadCreatedMobCache());
+  // 5.5 — animator data-first é re-criado a cada renderFrame() pois innerHTML
+  // descarta o `.forge-hero` anterior. Mantemos o handle aqui só para destroy.
+  private animator: ForgeAnimatorHandle | null = null;
+  private animatorVisibility: (() => void) | null = null;
+  // Elapsed preservado entre re-renders: evita "snap" da animação para o step 0
+  // toda vez que o usuário mexe num slider/input.
+  private animatorElapsed = 0;
 
   constructor(
     private readonly host: HTMLElement,
@@ -102,17 +131,33 @@ export class CharacterForgeController {
     this.cleanups.add(() => this.host.removeEventListener("click", this.onClick));
     this.cleanups.add(() => this.host.removeEventListener("input", this.onInput));
     this.cleanups.add(() => this.host.removeEventListener("pointermove", this.onPointerMove));
+    // 4.2 — reage a mutações no mob cache (export, send mob, import, ou mudança
+    // vinda de outra surface). Atualiza só os indicadores do pipeline footer.
+    this.cleanups.add(
+      subscribeCreatedMobCache((cache) => {
+        this.lastSync = createdMobSyncStatus(cache);
+        this.refreshSyncIndicators();
+      })
+    );
+    // 5.5 — destrói o animator e seu IO ao desmontar a surface.
+    this.cleanups.add(() => {
+      this.animatorVisibility?.();
+      this.animatorVisibility = null;
+      this.animator?.destroy();
+      this.animator = null;
+    });
     return { dispose: () => this.cleanups.dispose() };
   }
 
   private loadState(): ForgeState {
+    // Lê do settingsRepository (snapshot síncrono em memória). Bootstrap em
+    // main.ts garante que os repos já estão hidratados aqui.
+    const parsed = readSetting<Partial<ForgeState>>(STORAGE_KEY);
+    if (!parsed) {
+      const current = createDefaultForgeBuild();
+      return { current, favorites: [], compare: false, animation: "idle", simulationVerb: current.motionProfile.primaryVerb };
+    }
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        const current = createDefaultForgeBuild();
-        return { current, favorites: [], compare: false, animation: "idle", simulationVerb: current.motionProfile.primaryVerb };
-      }
-      const parsed = JSON.parse(raw) as Partial<ForgeState>;
       const current = parsed.current ? finalizeForgeBuild(parsed.current) : createDefaultForgeBuild();
       return {
         current,
@@ -130,7 +175,8 @@ export class CharacterForgeController {
   }
 
   private persist(): void {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+    // Flush diferido (idle + debounce). UI continua responsiva.
+    writeSetting(STORAGE_KEY, this.state);
   }
 
   private updateCurrent(patch: Partial<ForgeBuild>, keepPrevious = true): void {
@@ -146,10 +192,12 @@ export class CharacterForgeController {
   private renderFrame(): void {
     const build = this.state.current;
     const palette = FORGE_PALETTES.find((entry) => entry.id === build.paletteId) ?? FORGE_PALETTES[0];
-    const mobCache = loadCreatedMobCache();
-    const sync = createdMobSyncStatus(mobCache);
+    // 4.2 — sync vem do campo (atualizado via subscribe). Sem I/O por frame.
+    const sync = this.lastSync;
     const archetype = forgeBuildToCharacterArchetype(build);
     const activeMotion = this.state.simulationVerb ?? build.motionProfile.primaryVerb;
+    // 4.3 — preserva foco/seleção entre re-renders.
+    const focus = this.captureFocus();
     this.host.innerHTML = `
       <section class="forge-shell" data-testid="character-forge-shell" style="--forge-primary:${palette.primary};--forge-secondary:${palette.secondary};--forge-glow:${palette.glow};--forge-eye:${palette.eye};--forge-fx:${palette.fx};--forge-tilt-x:${this.pointer.y};--forge-tilt-y:${this.pointer.x};--forge-dash-distance:${build.motionProfile.dashDistance};--forge-speed-burst:${build.motionProfile.speedBurst};">
         <header class="forge-header">
@@ -188,7 +236,7 @@ export class CharacterForgeController {
             </div>
             <label class="forge-mutation">
               <span>Mutation</span>
-              <input type="range" min="0" max="100" value="${build.mutation}" data-forge-mutation>
+              <input type="range" min="0" max="100" value="${build.mutation}" data-forge-mutation data-focus-key="mutation">
               <b>${build.mutation}%</b>
             </label>
           </aside>
@@ -203,7 +251,7 @@ export class CharacterForgeController {
             <div class="forge-animation-dock" data-testid="forge-animation-dock">
               ${Object.entries(FORGE_ANIMATIONS).map(([id, name]) => `<button class="${this.state.animation === id ? "active" : ""}" data-forge-animation="${id}">${name}</button>`).join("")}
             </div>
-            <div class="forge-hero" data-species="${build.species}" data-body="${build.body}" data-head="${build.head}" data-aura="${build.aura}" data-animation="${this.state.animation}" data-motion="${activeMotion}">
+            <div class="forge-hero" data-driven="true" data-species="${build.species}" data-body="${build.body}" data-head="${build.head}" data-aura="${build.aura}" data-animation="${this.state.animation}" data-motion="${activeMotion}">
               <div class="forge-orbit forge-orbit-a"></div>
               <div class="forge-orbit forge-orbit-b"></div>
               <div class="forge-action-arc"></div>
@@ -269,6 +317,89 @@ export class CharacterForgeController {
         </footer>
       </section>
     `;
+    // 4.3 — restaura foco/seleção em sliders, inputs e botões ativos.
+    this.restoreFocus(focus);
+    // 5.5 — re-instala o animator data-first sobre o novo .forge-hero.
+    this.mountAnimator(build.motionProfile);
+  }
+
+  // 5.5 — Cria/recria o ForgeAnimator. innerHTML descartou o hero anterior, então
+  // o handle antigo é descartado e um novo é criado apontado para o novo nó.
+  // O IntersectionObserver pausa quando o painel sai da viewport (mobile/scroll).
+  private mountAnimator(profile: import("../../domain/characterForge").ForgeMotionProfile): void {
+    if (this.animator) {
+      // Capta elapsed antes de descartar para que o novo animator continue
+      // de onde o anterior parou — preserva a fase em re-renders rápidos.
+      this.animatorElapsed = this.animator.getElapsed();
+      this.animator.destroy();
+      this.animator = null;
+    }
+    if (this.animatorVisibility) {
+      this.animatorVisibility();
+      this.animatorVisibility = null;
+    }
+    const hero = this.host.querySelector<HTMLElement>(".forge-hero[data-driven=\"true\"]");
+    if (!hero) return;
+    this.animator = createForgeAnimator({ target: hero, profile, initialElapsed: this.animatorElapsed });
+    // Reaproveita o util da Fase 4.5: pausa RAF quando o palco do Forge sai
+    // da viewport. setProperty com -- é cheap, mas zero CPU é melhor ainda.
+    this.animatorVisibility = attachVisibilityPause(hero, this.animator);
+  }
+
+  // 4.3 — Captura referência estável de foco antes de regravar innerHTML.
+  // Usa atributos data-* já existentes nos botões/inputs para gerar uma chave
+  // determinística. Range/text inputs preservam selectionStart/End e scroll.
+  private captureFocus(): FocusSnapshot | null {
+    const active = document.activeElement;
+    if (!active || !(active instanceof HTMLElement)) return null;
+    if (!this.host.contains(active)) return null;
+    const key = focusKey(active);
+    if (!key) return null;
+    let selectionStart: number | null = null;
+    let selectionEnd: number | null = null;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = active.selectionStart;
+        selectionEnd = active.selectionEnd;
+      } catch {
+        // Alguns tipos de input (range, color) não suportam selectionStart.
+      }
+    }
+    return { key, selectionStart, selectionEnd, scrollTop: active.scrollTop };
+  }
+
+  private restoreFocus(snapshot: FocusSnapshot | null): void {
+    if (!snapshot) return;
+    const target = this.host.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(snapshot.key)}"]`);
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.scrollTop = snapshot.scrollTop;
+    if (
+      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+      snapshot.selectionStart !== null
+    ) {
+      try {
+        target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd ?? snapshot.selectionStart);
+      } catch {
+        // Inputs do tipo range não permitem setSelectionRange. Ignoramos.
+      }
+    }
+  }
+
+  // 4.2 — atualização parcial do rodapé "pipeline" (Postgres/Blob mock + mob output).
+  // Evita re-render completo quando outra surface muda o cache de mobs.
+  private refreshSyncIndicators(): void {
+    const panel = this.host.querySelector<HTMLElement>(".forge-pipeline");
+    if (!panel) return;
+    const sync = this.lastSync;
+    const cells = panel.querySelectorAll<HTMLElement>(":scope > div");
+    if (cells.length < 3) return;
+    const postgresStrong = cells[1].querySelector<HTMLElement>("strong");
+    const postgresEm = cells[1].querySelector<HTMLElement>("em");
+    const blobStrong = cells[2].querySelector<HTMLElement>("strong");
+    if (postgresStrong) postgresStrong.textContent = `${sync.cachedRows} rows`;
+    if (postgresEm) postgresEm.textContent = sync.lastSyncLabel;
+    if (blobStrong) blobStrong.textContent = `${sync.cachedBlobs} objects`;
   }
 
   private renderOptionGroup<T extends string>(title: string, field: ForgeField, options: readonly T[]): string {
@@ -332,7 +463,7 @@ export class CharacterForgeController {
             .map((verb) => `<button class="${activeMotion === verb ? "active" : ""}" data-forge-motion="${verb}">${FORGE_MOTION_VERBS[verb]}</button>`)
             .join("")}
         </div>
-        <div class="forge-sim-track" data-motion="${activeMotion}">
+        <div class="forge-sim-track" data-driven="true" data-motion="${activeMotion}">
           <span class="forge-sim-start">0m</span>
           <span class="forge-sim-end">${activeMotion === "blink" ? motion.blinkRange : motion.dashDistance}m</span>
           ${stepNodes}
@@ -581,4 +712,31 @@ function hash(input: string): number {
   let value = 2166136261;
   for (let index = 0; index < input.length; index += 1) value = Math.imul(value ^ input.charCodeAt(index), 16777619);
   return value >>> 0;
+}
+
+// 4.3 — Gera chave estável de foco a partir dos data-* já existentes. Cobre os
+// principais alvos do Forge (sliders, botões de field/value, presets, skills,
+// motion, animation, action, favorite). Sem isso, perderíamos foco a cada
+// re-render porque innerHTML descarta a árvore inteira.
+function focusKey(element: HTMLElement): string | null {
+  const explicit = element.dataset.focusKey;
+  if (explicit) return explicit;
+  const ds = element.dataset;
+  if (ds.forgeMutation !== undefined) return "mutation";
+  if (ds.forgeField && ds.forgeValue) return `field:${ds.forgeField}:${ds.forgeValue}`;
+  if (ds.forgeSkillSlot && ds.forgeSkill) return `skill:${ds.forgeSkillSlot}:${ds.forgeSkill}`;
+  if (ds.forgePreset) return `preset:${ds.forgePreset}`;
+  if (ds.forgeFavorite) return `favorite:${ds.forgeFavorite}`;
+  if (ds.forgeAnimation) return `animation:${ds.forgeAnimation}`;
+  if (ds.forgeMotion) return `motion:${ds.forgeMotion}`;
+  if (ds.forgeAction) return `action:${ds.forgeAction}`;
+  if (ds.route) return `route:${ds.route}`;
+  return null;
+}
+
+// CSS.escape polyfill leve. Os tokens que produzimos só contêm letras, dígitos,
+// `:` e `-`, então um escape mínimo basta. Usamos a nativa quando existir.
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
