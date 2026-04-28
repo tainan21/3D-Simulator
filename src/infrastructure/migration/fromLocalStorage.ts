@@ -10,6 +10,8 @@
 //   rogue-shell-runtime-artifact   → runtimeArtifactRepository
 //   rogue-shell-replays            → replayRepository
 //   rogue-created-mob-cache-v1     → mobRepository
+//   rogue-shell-studio-ui          → settings:rogue-shell-studio-ui (UI prefs)
+//   rogue-character-forge          → settings:rogue-character-forge (Forge state)
 
 import { mobRepository } from "../repo/mobRepository";
 import { archetypeRepository } from "../repo/archetypeRepository";
@@ -29,6 +31,9 @@ const LEGACY_KEYS = {
   runtimeArtifact: "rogue-shell-runtime-artifact",
   replayRecords: "rogue-shell-replays",
   mobCache: "rogue-created-mob-cache-v1",
+  // Lidos pelos controllers (Studio/Forge) e agora persistidos via settingsRepo.
+  studioUi: "rogue-shell-studio-ui",
+  forgeState: "rogue-character-forge",
 } as const;
 
 function readJson<T>(key: string): T | undefined {
@@ -108,6 +113,20 @@ export async function migrateFromLocalStorageOnce(): Promise<void> {
     if (record?.id && record.build && record.archetype) mobRepository().upsert(record);
   }
   if (legacyMobs?.records?.length) migrated += 1;
+
+  // 6) Studio UI prefs (painéis, themes, presets de view, command palette)
+  const legacyStudioUi = readJson<Record<string, unknown>>(LEGACY_KEYS.studioUi);
+  if (legacyStudioUi) {
+    settings.upsert({ id: LEGACY_KEYS.studioUi, value: legacyStudioUi });
+    migrated += 1;
+  }
+
+  // 7) Forge state (build atual, favorites, compare, animation, copiedCode)
+  const legacyForge = readJson<unknown>(LEGACY_KEYS.forgeState);
+  if (legacyForge) {
+    settings.upsert({ id: LEGACY_KEYS.forgeState, value: legacyForge });
+    migrated += 1;
+  }
 
   // Marca como migrado.
   settings.upsert({ id: FLAG_KEY, value: true });

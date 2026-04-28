@@ -54,6 +54,7 @@ import {
 } from "../../infrastructure/createdMobCache";
 import { createForgeAnimator, type ForgeAnimatorHandle } from "../../runtime/forgeAnimator";
 import { attachVisibilityPause } from "../utils/visibilityPause";
+import { readSetting, writeSetting } from "../../infrastructure/repo/settingsRepository";
 
 type ForgeSyncStatus = ReturnType<typeof createdMobSyncStatus>;
 
@@ -149,13 +150,14 @@ export class CharacterForgeController {
   }
 
   private loadState(): ForgeState {
+    // Lê do settingsRepository (snapshot síncrono em memória). Bootstrap em
+    // main.ts garante que os repos já estão hidratados aqui.
+    const parsed = readSetting<Partial<ForgeState>>(STORAGE_KEY);
+    if (!parsed) {
+      const current = createDefaultForgeBuild();
+      return { current, favorites: [], compare: false, animation: "idle", simulationVerb: current.motionProfile.primaryVerb };
+    }
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        const current = createDefaultForgeBuild();
-        return { current, favorites: [], compare: false, animation: "idle", simulationVerb: current.motionProfile.primaryVerb };
-      }
-      const parsed = JSON.parse(raw) as Partial<ForgeState>;
       const current = parsed.current ? finalizeForgeBuild(parsed.current) : createDefaultForgeBuild();
       return {
         current,
@@ -173,7 +175,8 @@ export class CharacterForgeController {
   }
 
   private persist(): void {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+    // Flush diferido (idle + debounce). UI continua responsiva.
+    writeSetting(STORAGE_KEY, this.state);
   }
 
   private updateCurrent(patch: Partial<ForgeBuild>, keepPrevious = true): void {

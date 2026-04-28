@@ -35,6 +35,7 @@ import { STUDIO_SCENARIOS } from "../../studio/scenarios";
 import { ACTOR_VISUAL_BRUSHES, paintSurfaceTile, pointToSurfaceCell, SURFACE_BRUSHES, withActorVisual } from "../../studio/surfaceStudio";
 import { materializeCreatedMobs } from "../../domain/createdMob";
 import { createdMobSyncStatus, loadCreatedMobCache, subscribeCreatedMobCache } from "../../infrastructure/createdMobCache";
+import { readSetting, writeSetting } from "../../infrastructure/repo/settingsRepository";
 import { rafThrottle } from "../utils/rafThrottle";
 import { idleDebounce } from "../utils/idleDebounce";
 import { attachVisibilityPause } from "../utils/visibilityPause";
@@ -228,19 +229,13 @@ export class StudioSurfaceController {
   }
 
   private readUiPrefs(): Record<string, unknown> {
-    try {
-      return JSON.parse(window.localStorage.getItem(STUDIO_UI_STORAGE_KEY) ?? "{}") as Record<string, unknown>;
-    } catch {
-      return {};
-    }
+    // Lê do settingsRepository (snapshot síncrono em memória, sem I/O).
+    return readSetting<Record<string, unknown>>(STUDIO_UI_STORAGE_KEY) ?? {};
   }
 
   private writeUiPrefs(patch: Record<string, unknown>): void {
-    try {
-      window.localStorage.setItem(STUDIO_UI_STORAGE_KEY, JSON.stringify({ ...this.readUiPrefs(), ...patch }));
-    } catch {
-      // Studio preferences are convenience-only.
-    }
+    // Flush diferido via idle + debounce — UI nunca toca storage diretamente.
+    writeSetting(STUDIO_UI_STORAGE_KEY, { ...this.readUiPrefs(), ...patch });
   }
 
   private readUiNumber(key: string, fallback: number): number {
