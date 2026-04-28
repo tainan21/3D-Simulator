@@ -3120,3 +3120,53 @@ button:focus-visible {
     grid-template-rows: minmax(0, 1fr);
   }
 }
+
+/* ----------------------------------------------------------------------
+   Fase 5 — Forge Animator (data-first via simulationSteps)
+   - Variables `--forge-step-x|z|t|progress` publicadas por forgeAnimator.ts.
+   - Aplicadas só em elementos com `[data-driven="true"]` para coexistir
+     com os keyframes legados (idle/walk/dash/blink/roll/speed) sem conflito.
+   - Sincronizado com FIXED_TIMESTEP da simulação (1/12s por step canônico).
+---------------------------------------------------------------------- */
+
+/* sim-runner data-driven posiciona-se exatamente onde o step canônico está,
+   substituindo o keyframe genérico (forgeSimDash/forgeSimBlink/...) sem removê-lo. */
+.forge-sim-track[data-driven="true"] .forge-sim-runner {
+  animation: none;
+  left: calc(var(--forge-step-progress, 0) * 100%);
+  transition: left 80ms linear;
+}
+
+/* Fase em curso pinta sutilmente os marcadores de step do track. Apenas
+   visual — nenhuma regra de gameplay depende desses pseudo-elementos. */
+.forge-sim-track[data-driven="true"] .forge-sim-step {
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.forge-hero[data-driven="true"][data-forge-phase="windup"]
+  ~ .forge-sim-track[data-driven="true"] .forge-sim-step:nth-child(1) {
+  opacity: 1;
+  transform: scale(1.18);
+}
+
+.forge-hero[data-driven="true"][data-forge-phase="travel"]
+  ~ .forge-sim-track[data-driven="true"] .forge-sim-step:nth-child(2),
+.forge-hero[data-driven="true"][data-forge-phase="travel"]
+  ~ .forge-sim-track[data-driven="true"] .forge-sim-step:nth-child(3) {
+  opacity: 1;
+  transform: scale(1.12);
+}
+
+.forge-hero[data-driven="true"][data-forge-phase="impact"]
+  ~ .forge-sim-track[data-driven="true"] .forge-sim-step:nth-child(4) {
+  opacity: 1;
+  transform: scale(1.24);
+}
+
+/* prefers-reduced-motion: força pose estática mesmo quando driven. O animator
+   já não roda RAF nesse caso, mas garantimos visual estável aqui também. */
+@media (prefers-reduced-motion: reduce) {
+  .forge-sim-track[data-driven="true"] .forge-sim-runner {
+    transition: none;
+  }
+}

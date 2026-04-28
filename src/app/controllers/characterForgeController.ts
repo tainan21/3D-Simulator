@@ -52,6 +52,8 @@ import {
   subscribeCreatedMobCache,
   upsertForgeBuildIntoMobCache
 } from "../../infrastructure/createdMobCache";
+import { createForgeAnimator, type ForgeAnimatorHandle } from "../../runtime/forgeAnimator";
+import { attachVisibilityPause } from "../utils/visibilityPause";
 
 type ForgeSyncStatus = ReturnType<typeof createdMobSyncStatus>;
 
@@ -106,6 +108,13 @@ export class CharacterForgeController {
   // 4.2 — sync status cacheado: lido do mobRepository no mount e atualizado via
   // subscribe. renderFrame() não chama loadCreatedMobCache() em hot path.
   private lastSync: ForgeSyncStatus = createdMobSyncStatus(loadCreatedMobCache());
+  // 5.5 — animator data-first é re-criado a cada renderFrame() pois innerHTML
+  // descarta o `.forge-hero` anterior. Mantemos o handle aqui só para destroy.
+  private animator: ForgeAnimatorHandle | null = null;
+  private animatorVisibility: (() => void) | null = null;
+  // Elapsed preservado entre re-renders: evita "snap" da animação para o step 0
+  // toda vez que o usuário mexe num slider/input.
+  private animatorElapsed = 0;
 
   constructor(
     private readonly host: HTMLElement,
@@ -129,6 +138,13 @@ export class CharacterForgeController {
         this.refreshSyncIndicators();
       })
     );
+    // 5.5 — destrói o animator e seu IO ao desmontar a surface.
+    this.cleanups.add(() => {
+      this.animatorVisibility?.();
+      this.animatorVisibility = null;
+      this.animator?.destroy();
+      this.animator = null;
+    });
     return { dispose: () => this.cleanups.dispose() };
   }
 
@@ -232,7 +248,7 @@ export class CharacterForgeController {
             <div class="forge-animation-dock" data-testid="forge-animation-dock">
               ${Object.entries(FORGE_ANIMATIONS).map(([id, name]) => `<button class="${this.state.animation === id ? "active" : ""}" data-forge-animation="${id}">${name}</button>`).join("")}
             </div>
-            <div class="forge-hero" data-species="${build.species}" data-body="${build.body}" data-head="${build.head}" data-aura="${build.aura}" data-animation="${this.state.animation}" data-motion="${activeMotion}">
+            <div class="forge-hero" data-driven="true" data-species="${build.species}" data-body="${build.body}" data-head="${build.head}" data-aura="${build.aura}" data-animation="${this.state.animation}" data-motion="${activeMotion}">
               <div class="forge-orbit forge-orbit-a"></div>
               <div class="forge-orbit forge-orbit-b"></div>
               <div class="forge-action-arc"></div>
@@ -300,6 +316,31 @@ export class CharacterForgeController {
     `;
     // 4.3 — restaura foco/seleção em sliders, inputs e botões ativos.
     this.restoreFocus(focus);
+    // 5.5 — re-instala o animator data-first sobre o novo .forge-hero.
+    this.mountAnimator(build.motionProfile);
+  }
+
+  // 5.5 — Cria/recria o ForgeAnimator. innerHTML descartou o hero anterior, então
+  // o handle antigo é descartado e um novo é criado apontado para o novo nó.
+  // O IntersectionObserver pausa quando o painel sai da viewport (mobile/scroll).
+  private mountAnimator(profile: import("../../domain/characterForge").ForgeMotionProfile): void {
+    if (this.animator) {
+      // Capta elapsed antes de descartar para que o novo animator continue
+      // de onde o anterior parou — preserva a fase em re-renders rápidos.
+      this.animatorElapsed = this.animator.getElapsed();
+      this.animator.destroy();
+      this.animator = null;
+    }
+    if (this.animatorVisibility) {
+      this.animatorVisibility();
+      this.animatorVisibility = null;
+    }
+    const hero = this.host.querySelector<HTMLElement>(".forge-hero[data-driven=\"true\"]");
+    if (!hero) return;
+    this.animator = createForgeAnimator({ target: hero, profile, initialElapsed: this.animatorElapsed });
+    // Reaproveita o util da Fase 4.5: pausa RAF quando o palco do Forge sai
+    // da viewport. setProperty com -- é cheap, mas zero CPU é melhor ainda.
+    this.animatorVisibility = attachVisibilityPause(hero, this.animator);
   }
 
   // 4.3 — Captura referência estável de foco antes de regravar innerHTML.
@@ -419,7 +460,7 @@ export class CharacterForgeController {
             .map((verb) => `<button class="${activeMotion === verb ? "active" : ""}" data-forge-motion="${verb}">${FORGE_MOTION_VERBS[verb]}</button>`)
             .join("")}
         </div>
-        <div class="forge-sim-track" data-motion="${activeMotion}">
+        <div class="forge-sim-track" data-driven="true" data-motion="${activeMotion}">
           <span class="forge-sim-start">0m</span>
           <span class="forge-sim-end">${activeMotion === "blink" ? motion.blinkRange : motion.dashDistance}m</span>
           ${stepNodes}
