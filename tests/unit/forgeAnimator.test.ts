@@ -232,8 +232,10 @@ describe("ForgeAnimator", () => {
   });
 
   it("setProfile reaplica timeline mantendo elapsed (zero flash)", () => {
-    const buildA = finalizeForgeBuild(createDefaultForgeBuild());
-    const buildB = finalizeForgeBuild({ ...createDefaultForgeBuild(), species: "warden" });
+    const buildA = createDefaultForgeBuild();
+    // Re-finaliza com mutação alterada: dispara recompute de motionProfile
+    // (dashDistance/blinkRange variam com mutation), mas mantém shape válido.
+    const buildB = finalizeForgeBuild({ ...createDefaultForgeBuild(), mutation: 88 });
     const target = createFakeTarget();
     const sched = installFakeRaf();
 
